@@ -1,0 +1,713 @@
+================================================================================
+ UNIVERSIDAD MAYOR DE SAN ANDRÉS (UMSA)
+ FACULTAD DE CIENCIAS PURAS Y NATURALES - CARRERA DE INFORMÁTICA
+ GRUPO 4: SISTEMA DE GESTIÓN Y RECOLECCIÓN DE RESIDUOS SÓLIDOS
+ SOLUCIÓN DE PROGRAMACIÓN AVANZADA EN POSTGRESQL (PL/pgSQL)
+================================================================================
+
+ÍNDICE GENERAL
+--------------------------------------------------------------------------------
+1. TABLA PREVIA DE AUDITORÍA (Requisito para Triggers)
+2. CINCO (5) FUNCIONES (PL/pgSQL)
+   2.1 fn_calcular_antiguedad_empleado(p_ci INT)
+   2.2 fn_total_capacidad_ruta(p_id_ruta INT)
+   2.3 fn_verificar_vigencia_licencia(p_ci INT)
+   2.4 fn_total_insumos_entregados_mes(p_id_insumo INT, p_ci INT, p_mes INT, p_anio INT)
+   2.5 fn_tasa_ocupacion_vehiculo(p_id_vehiculo INT, p_fecha DATE, p_turno VARCHAR)
+3. CINCO (5) PROCEDIMIENTOS ALMACENADOS (PL/pgSQL)
+   3.1 sp_registrar_entrega_insumo(p_id_insumo INT, p_ci INT, p_cantidad INT)
+   3.2 sp_reasignar_turno_limpiador(p_ci INT, p_nuevo_turno VARCHAR)
+   3.3 sp_cambiar_estado_vehiculo(p_id_vehiculo INT, p_nuevo_estado VARCHAR, p_id_centro INT)
+   3.4 sp_incremento_salarial_categoria(p_categoria VARCHAR, p_porcentaje NUMERIC)
+   3.5 sp_registrar_recoleccion_contenedor(p_id_ruta INT, p_id_contenedor INT, p_id_vehiculo INT, p_turno VARCHAR)
+4. CINCO (5) TRIGGERS Y FUNCIONES DISPARADORAS
+   4.1 trg_validar_salario_minimo [EMPLEADO]
+   4.2 trg_control_stock_insumos [ENTREGA]
+   4.3 trg_auditoria_cambio_salario [EMPLEADO]
+   4.4 trg_impedir_conductor_inhabilitado [CONDUCE]
+   4.5 trg_actualizar_estado_contenedor [ABARCA]
+5. CINCO (5) CURSORES ANIDADOS (Bloques anónimos DO $$)
+   5.1 Cursor Anidado 1: Jerarquía de Rutas y Contenedores por Distrito
+   5.2 Cursor Anidado 2: Rendimiento y Recolección por Vehículo y Turno
+   5.3 Cursor Anidado 3: Balance de Dotación e Insumos por Categoría de Empleado
+   5.4 Cursor Anidado 4: Trazabilidad de Centros de Destino y Flota Asignada
+   5.5 Cursor Anidado 5: Auditoría de Rutas y Cumplimiento de Personal de Limpieza
+================================================================================
+
+
+================================================================================
+1. TABLA PREVIA DE AUDITORÍA (Requisito para Trigger 4.3)
+================================================================================
+CREATE TABLE IF NOT EXISTS AUDITORIA_SALARIO (
+    id_auditoria   SERIAL PRIMARY KEY,
+    ci             INT NOT NULL,
+    fecha_cambio   TIMESTAMP NOT NULL DEFAULT clock_timestamp(),
+    usuario_bd     VARCHAR(50) NOT NULL,
+    salario_ant    NUMERIC(10,2) NOT NULL,
+    salario_nuevo  NUMERIC(10,2) NOT NULL
+);
+
+
+================================================================================
+2. CINCO (5) FUNCIONES (PL/pgSQL)
+================================================================================
+
+-- 2.1 Calcula los años de servicio cumplidos de un empleado
+CREATE OR REPLACE FUNCTION fn_calcular_antiguedad_empleado(p_ci INT)
+RETURNS INT AS $$
+DECLARE
+    v_anios INT := 0;
+BEGIN
+    SELECT EXTRACT(YEAR FROM AGE(CURRENT_DATE, fecha_ingreso))::INT
+    INTO v_anios
+    FROM EMPLEADO
+    WHERE ci = p_ci;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Empleado con CI % no registrado en el sistema', p_ci;
+    END IF;
+
+    RETURN COALESCE(v_anios, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Prueba 2.1:
+-- SELECT ci, nombre, paterno, fecha_ingreso, fn_calcular_antiguedad_empleado(ci) AS antiguedad_anios FROM EMPLEADO LIMIT 5;
+
+
+-- 2.2 Suma la capacidad volumétrica operativa en litros instalada en una ruta
+CREATE OR REPLACE FUNCTION fn_total_capacidad_ruta(p_id_ruta INT)
+RETURNS INT AS $$
+DECLARE
+    v_total_litros INT := 0;
+BEGIN
+    SELECT COALESCE(SUM(capacidad), 0)
+    INTO v_total_litros
+    FROM CONTENEDOR
+    WHERE id_ruta = p_id_ruta
+      AND UPPER(TRIM(estado)) NOT IN ('EN REPARACION', 'MALO');
+
+    RETURN v_total_litros;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Prueba 2.2:
+-- SELECT id_ruta, descripcion, fn_total_capacidad_ruta(id_ruta) AS capacidad_litros_operativa FROM RUTA LIMIT 5;
+
+
+-- 2.3 Verifica si la licencia de conducir de un chofer está vigente a la fecha actual
+CREATE OR REPLACE FUNCTION fn_verificar_vigencia_licencia(p_ci INT)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_vencimiento DATE;
+BEGIN
+    SELECT vencimiento_licencia
+    INTO v_vencimiento
+    FROM CONDUCTOR
+    WHERE ci = p_ci;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Conductor con CI % no existe', p_ci;
+    END IF;
+
+    RETURN (v_vencimiento >= CURRENT_DATE);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Prueba 2.3:
+-- SELECT ci, categoria, vencimiento_licencia, fn_verificar_vigencia_licencia(ci) AS licencia_valida FROM CONDUCTOR LIMIT 5;
+
+
+-- 2.4 Suma la dotación total entregada de un insumo a un empleado en un mes y año específico
+CREATE OR REPLACE FUNCTION fn_total_insumos_entregados_mes(
+    p_id_insumo INT,
+    p_ci INT,
+    p_mes INT,
+    p_anio INT
+)
+RETURNS INT AS $$
+DECLARE
+    v_total INT := 0;
+BEGIN
+    SELECT COALESCE(SUM(cantidad), 0)
+    INTO v_total
+    FROM ENTREGA
+    WHERE id_insumo = p_id_insumo
+      AND ci = p_ci
+      AND EXTRACT(MONTH FROM fecha) = p_mes
+      AND EXTRACT(YEAR FROM fecha) = p_anio;
+
+    RETURN v_total;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Prueba 2.4:
+-- SELECT fn_total_insumos_entregados_mes(1, 1800000, 8, 2024) AS insumos_entregados;
+
+
+-- 2.5 Calcula el porcentaje de ocupación volumétrica de un vehículo según los contenedores atendidos
+CREATE OR REPLACE FUNCTION fn_tasa_ocupacion_vehiculo(
+    p_id_vehiculo INT,
+    p_fecha DATE,
+    p_turno VARCHAR
+)
+RETURNS NUMERIC(5,2) AS $$
+DECLARE
+    v_capacidad_vehiculo NUMERIC(10,2);
+    v_volumen_recolectado NUMERIC(10,2) := 0;
+    v_tasa NUMERIC(5,2) := 0.00;
+BEGIN
+    SELECT capacidad::NUMERIC(10,2)
+    INTO v_capacidad_vehiculo
+    FROM VEHICULO
+    WHERE id_vehiculo = p_id_vehiculo;
+
+    IF NOT FOUND OR v_capacidad_vehiculo <= 0 THEN
+        RETURN 0.00;
+    END IF;
+
+    SELECT COALESCE(SUM(c.capacidad), 0)::NUMERIC(10,2)
+    INTO v_volumen_recolectado
+    FROM ABARCA a
+    JOIN CONTENEDOR c ON a.id_ruta = c.id_ruta AND a.id_contenedor = c.id_contenedor
+    WHERE a.id_vehiculo = p_id_vehiculo
+      AND a.fecha = p_fecha
+      AND UPPER(TRIM(a.turno)) = UPPER(TRIM(p_turno));
+
+    v_tasa := ROUND(((v_volumen_recolectado / v_capacidad_vehiculo) * 100.0), 2);
+    RETURN v_tasa;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Prueba 2.5:
+-- SELECT fn_tasa_ocupacion_vehiculo(1, '2024-05-15', 'MANANA') AS tasa_ocupacion_pct;
+
+
+================================================================================
+3. CINCO (5) PROCEDIMIENTOS ALMACENADOS (PL/pgSQL)
+================================================================================
+
+-- 3.1 Registra la entrega de insumo descontando de almacén en una transacción segura
+CREATE OR REPLACE PROCEDURE sp_registrar_entrega_insumo(
+    p_id_insumo INT,
+    p_ci INT,
+    p_cantidad INT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_stock_actual INT;
+BEGIN
+    IF p_cantidad <= 0 THEN
+        RAISE EXCEPTION 'La cantidad de insumo a entregar debe ser mayor a cero (recibido: %)', p_cantidad;
+    END IF;
+
+    SELECT cantidad INTO v_stock_actual
+    FROM INSUMO
+    WHERE id_insumo = p_id_insumo
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'El insumo % no existe en almacén', p_id_insumo;
+    END IF;
+
+    IF v_stock_actual < p_cantidad THEN
+        RAISE EXCEPTION 'Stock insuficiente para insumo %. Disponible: %, Solicitado: %', p_id_insumo, v_stock_actual, p_cantidad;
+    END IF;
+
+    -- Registrar entrega
+    INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad)
+    VALUES (p_id_insumo, p_ci, CURRENT_DATE, p_cantidad)
+    ON CONFLICT (id_insumo, ci, fecha)
+    DO UPDATE SET cantidad = ENTREGA.cantidad + EXCLUDED.cantidad;
+
+    -- Descontar existencia
+    UPDATE INSUMO
+    SET cantidad = cantidad - p_cantidad
+    WHERE id_insumo = p_id_insumo;
+
+    RAISE NOTICE 'Entrega registrada exitosamente. Saldo restante de insumo %: %', p_id_insumo, (v_stock_actual - p_cantidad);
+END;
+$$;
+
+-- Prueba 3.1:
+-- CALL sp_registrar_entrega_insumo(1, 1800000, 2);
+
+
+-- 3.2 Modifica el turno operativo de un limpiador
+CREATE OR REPLACE PROCEDURE sp_reasignar_turno_limpiador(
+    p_ci INT,
+    p_nuevo_turno VARCHAR
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_turno_valido VARCHAR(10) := UPPER(TRIM(p_nuevo_turno));
+BEGIN
+    IF v_turno_valido NOT IN ('MANANA', 'TARDE', 'NOCHE') THEN
+        RAISE EXCEPTION 'Turno inválido (%). Opciones permitidas: MANANA, TARDE, NOCHE', p_nuevo_turno;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM LIMPIADOR WHERE ci = p_ci) THEN
+        RAISE EXCEPTION 'El empleado con CI % no figura en la planilla de LIMPIADORES', p_ci;
+    END IF;
+
+    UPDATE LIMPIADOR
+    SET turno = v_turno_valido
+    WHERE ci = p_ci;
+
+    RAISE NOTICE 'Turno del limpiador CI % actualizado a %', p_ci, v_turno_valido;
+END;
+$$;
+
+-- Prueba 3.2:
+-- CALL sp_reasignar_turno_limpiador(1800000, 'NOCHE');
+
+
+-- 3.3 Asigna un nuevo estado y centro de destino a un vehículo
+CREATE OR REPLACE PROCEDURE sp_cambiar_estado_vehiculo(
+    p_id_vehiculo INT,
+    p_nuevo_estado VARCHAR,
+    p_id_centro INT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_estado_norm VARCHAR(20) := UPPER(TRIM(p_nuevo_estado));
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM VEHICULO WHERE id_vehiculo = p_id_vehiculo) THEN
+        RAISE EXCEPTION 'Vehículo con ID % no encontrado', p_id_vehiculo;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM CENTRO_DESTINO WHERE id_centro = p_id_centro) THEN
+        RAISE EXCEPTION 'Centro de destino % no existe', p_id_centro;
+    END IF;
+
+    UPDATE VEHICULO
+    SET estado = v_estado_norm,
+        id_centro = p_id_centro
+    WHERE id_vehiculo = p_id_vehiculo;
+
+    RAISE NOTICE 'Vehículo % actualizado: Estado [%], Centro Asignado [%]', p_id_vehiculo, v_estado_norm, p_id_centro;
+END;
+$$;
+
+-- Prueba 3.3:
+-- CALL sp_cambiar_estado_vehiculo(1, 'EN MANTENIMIENTO', 1);
+
+
+-- 3.4 Aplica incremento porcentual a los conductores según su categoría de licencia
+CREATE OR REPLACE PROCEDURE sp_incremento_salarial_categoria(
+    p_categoria VARCHAR,
+    p_porcentaje NUMERIC
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_afectados INT := 0;
+BEGIN
+    IF p_porcentaje <= 0 OR p_porcentaje > 100 THEN
+        RAISE EXCEPTION 'Porcentaje de incremento no válido (%). Debe estar entre 0.01 y 100', p_porcentaje;
+    END IF;
+
+    UPDATE EMPLEADO e
+    SET salario = ROUND(e.salario * (1 + (p_porcentaje / 100.0)), 2)
+    FROM CONDUCTOR c
+    WHERE e.ci = c.ci
+      AND UPPER(TRIM(c.categoria)) = UPPER(TRIM(p_categoria));
+
+    GET DIAGNOSTICS v_afectados = ROW_COUNT;
+    RAISE NOTICE 'Salario actualizado para % conductores de la categoría % (+%%%)', v_afectados, p_categoria, p_porcentaje;
+END;
+$$;
+
+-- Prueba 3.4:
+-- CALL sp_incremento_salarial_categoria('C', 5.5);
+
+
+-- 3.5 Registra la recolección en ABARCA validando la pertenencia del contenedor a la ruta
+CREATE OR REPLACE PROCEDURE sp_registrar_recoleccion_contenedor(
+    p_id_ruta INT,
+    p_id_contenedor INT,
+    p_id_vehiculo INT,
+    p_turno VARCHAR
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_turno_norm VARCHAR(10) := UPPER(TRIM(p_turno));
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM CONTENEDOR WHERE id_ruta = p_id_ruta AND id_contenedor = p_id_contenedor) THEN
+        RAISE EXCEPTION 'El contenedor % no se encuentra asignado a la ruta %', p_id_contenedor, p_id_ruta;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM VEHICULO WHERE id_vehiculo = p_id_vehiculo) THEN
+        RAISE EXCEPTION 'El vehículo con ID % no existe', p_id_vehiculo;
+    END IF;
+
+    INSERT INTO ABARCA (id_ruta, id_contenedor, id_vehiculo, fecha, turno)
+    VALUES (p_id_ruta, p_id_contenedor, p_id_vehiculo, CURRENT_DATE, v_turno_norm)
+    ON CONFLICT (id_ruta, id_contenedor, id_vehiculo, fecha, turno) DO NOTHING;
+
+    RAISE NOTICE 'Recolección de contenedor % en ruta % asentada exitosamente', p_id_contenedor, p_id_ruta;
+END;
+$$;
+
+-- Prueba 3.5:
+-- CALL sp_registrar_recoleccion_contenedor(1, 1, 1, 'MANANA');
+
+
+================================================================================
+4. CINCO (5) TRIGGERS Y FUNCIONES DISPARADORAS
+================================================================================
+
+-- 4.1 Valida que ningún empleado perciba un salario menor a Bs 3,300
+CREATE OR REPLACE FUNCTION fn_trg_validar_salario_minimo()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.salario < 3300.00 THEN
+        RAISE EXCEPTION 'Error de validación laboral: El salario no puede ser inferior a Bs 3,300.00 (Valor ingresado: %)', NEW.salario;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_validar_salario_minimo ON EMPLEADO;
+CREATE TRIGGER trg_validar_salario_minimo
+BEFORE INSERT OR UPDATE OF salario ON EMPLEADO
+FOR EACH ROW EXECUTE FUNCTION fn_trg_validar_salario_minimo();
+
+
+-- 4.2 Controla que la entrega no supere el stock disponible en almacén
+CREATE OR REPLACE FUNCTION fn_trg_control_stock_insumos()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_stock_disponible INT;
+BEGIN
+    SELECT cantidad INTO v_stock_disponible
+    FROM INSUMO
+    WHERE id_insumo = NEW.id_insumo;
+
+    IF v_stock_disponible IS NULL THEN
+        RAISE EXCEPTION 'El insumo % no existe en inventario', NEW.id_insumo;
+    END IF;
+
+    IF NEW.cantidad > v_stock_disponible THEN
+        RAISE EXCEPTION 'Transacción rechazada: Stock insuficiente de insumo %. Disponible: %, Solicitado: %', 
+            NEW.id_insumo, v_stock_disponible, NEW.cantidad;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_control_stock_insumos ON ENTREGA;
+CREATE TRIGGER trg_control_stock_insumos
+BEFORE INSERT ON ENTREGA
+FOR EACH ROW EXECUTE FUNCTION fn_trg_control_stock_insumos();
+
+
+-- 4.3 Registra en tabla de auditoría los cambios históricos de salario
+CREATE OR REPLACE FUNCTION fn_trg_auditoria_salario()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.salario IS DISTINCT FROM NEW.salario THEN
+        INSERT INTO AUDITORIA_SALARIO (ci, fecha_cambio, usuario_bd, salario_ant, salario_nuevo)
+        VALUES (NEW.ci, clock_timestamp(), CURRENT_USER, OLD.salario, NEW.salario);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_auditoria_cambio_salario ON EMPLEADO;
+CREATE TRIGGER trg_auditoria_cambio_salario
+AFTER UPDATE OF salario ON EMPLEADO
+FOR EACH ROW EXECUTE FUNCTION fn_trg_auditoria_salario();
+
+
+-- 4.4 Impide asignar la conducción de vehículos a choferes con licencia caducada
+CREATE OR REPLACE FUNCTION fn_trg_impedir_conductor_inhabilitado()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_fecha_venc DATE;
+BEGIN
+    SELECT vencimiento_licencia INTO v_fecha_venc
+    FROM CONDUCTOR
+    WHERE ci = NEW.ci;
+
+    IF v_fecha_venc < NEW.fecha THEN
+        RAISE EXCEPTION 'Asignación rechazada: La licencia del chofer CI % se encuentra vencida desde % (Fecha de asignación: %)', 
+            NEW.ci, v_fecha_venc, NEW.fecha;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_impedir_conductor_inhabilitado ON CONDUCE;
+CREATE TRIGGER trg_impedir_conductor_inhabilitado
+BEFORE INSERT OR UPDATE OF fecha, ci ON CONDUCE
+FOR EACH ROW EXECUTE FUNCTION fn_trg_impedir_conductor_inhabilitado();
+
+
+-- 4.5 Actualiza a 'REGULAR' o 'EN REPARACION' contenedores con desgaste de recolección
+CREATE OR REPLACE FUNCTION fn_trg_actualizar_estado_contenedor()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_total_vaciados INT := 0;
+BEGIN
+    SELECT COUNT(*) INTO v_total_vaciados
+    FROM ABARCA
+    WHERE id_ruta = NEW.id_ruta AND id_contenedor = NEW.id_contenedor;
+
+    -- Si el contenedor superó más de 100 recolecciones registradas, marcar como desgaste regular
+    IF v_total_vaciados >= 100 THEN
+        UPDATE CONTENEDOR
+        SET estado = 'REGULAR'
+        WHERE id_ruta = NEW.id_ruta AND id_contenedor = NEW.id_contenedor AND estado = 'BUENO';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_actualizar_estado_contenedor ON ABARCA;
+CREATE TRIGGER trg_actualizar_estado_contenedor
+AFTER INSERT ON ABARCA
+FOR EACH ROW EXECUTE FUNCTION fn_trg_actualizar_estado_contenedor();
+
+
+================================================================================
+5. CINCO (5) CURSORES ANIDADOS (Bloques anónimos DO $$)
+================================================================================
+
+-- 5.1 Jerarquía de Rutas y Contenedores clasificados por cada Distrito Municipal
+DO $$
+DECLARE
+    cur_distritos CURSOR FOR 
+        SELECT id_distrito, nombre FROM DISTRITO ORDER BY id_distrito LIMIT 3;
+    
+    cur_rutas CURSOR(p_distrito INT) FOR
+        SELECT DISTINCT r.id_ruta, r.descripcion
+        FROM RUTA r
+        JOIN E_ZONA_RUTA ezr ON r.id_ruta = ezr.id_ruta
+        JOIN ZONA z ON ezr.id_zona = z.id_zona
+        WHERE z.id_distrito = p_distrito;
+
+    cur_contenedores CURSOR(p_ruta INT) FOR
+        SELECT id_contenedor, tipo, capacidad, estado
+        FROM CONTENEDOR
+        WHERE id_ruta = p_ruta;
+
+    reg_d RECORD;
+    reg_r RECORD;
+    reg_c RECORD;
+BEGIN
+    RAISE NOTICE '=== REPORTE 5.1: JERARQUÍA DISTRITO -> RUTA -> CONTENEDORES ===';
+    OPEN cur_distritos;
+    LOOP
+        FETCH cur_distritos INTO reg_d;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE 'DISTRITO [%]: %', reg_d.id_distrito, reg_d.nombre;
+
+        OPEN cur_rutas(reg_d.id_distrito);
+        LOOP
+            FETCH cur_rutas INTO reg_r;
+            EXIT WHEN NOT FOUND;
+            RAISE NOTICE '   └── RUTA [%]: %', reg_r.id_ruta, reg_r.descripcion;
+
+            OPEN cur_contenedores(reg_r.id_ruta);
+            LOOP
+                FETCH cur_contenedores INTO reg_c;
+                EXIT WHEN NOT FOUND;
+                RAISE NOTICE '         └── CONTENEDOR [%] - Tipo: % | Capacidad: % L | Estado: %',
+                    reg_c.id_contenedor, reg_c.tipo, reg_c.capacidad, reg_c.estado;
+            END LOOP;
+            CLOSE cur_contenedores;
+        END LOOP;
+        CLOSE cur_rutas;
+    END LOOP;
+    CLOSE cur_distritos;
+END $$;
+
+
+-- 5.2 Rendimiento de Recolección por Vehículo Operativo y Desglose por Turno
+DO $$
+DECLARE
+    cur_vehiculos CURSOR FOR
+        SELECT id_vehiculo, placa, modelo, capacidad
+        FROM VEHICULO
+        WHERE UPPER(TRIM(estado)) = 'OPERATIVO'
+        ORDER BY id_vehiculo LIMIT 3;
+
+    cur_recolecciones CURSOR(p_vehiculo INT) FOR
+        SELECT fecha, turno, COUNT(*) AS contenedores_atendidos
+        FROM ABARCA
+        WHERE id_vehiculo = p_vehiculo
+        GROUP BY fecha, turno
+        ORDER BY fecha DESC LIMIT 3;
+
+    reg_v RECORD;
+    reg_rec RECORD;
+BEGIN
+    RAISE NOTICE '=== REPORTE 5.2: RECOLECCIÓN POR VEHÍCULO Y TURNO ===';
+    OPEN cur_vehiculos;
+    LOOP
+        FETCH cur_vehiculos INTO reg_v;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE 'CAMIÓN [%] Placa: % | Modelo: % | Capacidad: % L',
+            reg_v.id_vehiculo, reg_v.placa, reg_v.modelo, reg_v.capacidad;
+
+        OPEN cur_recolecciones(reg_v.id_vehiculo);
+        LOOP
+            FETCH cur_recolecciones INTO reg_rec;
+            EXIT WHEN NOT FOUND;
+            RAISE NOTICE '   └── Fecha: % | Turno: % | Contenedores Vaciados: %',
+                reg_rec.fecha, reg_rec.turno, reg_rec.contenedores_atendidos;
+        END LOOP;
+        CLOSE cur_recolecciones;
+    END LOOP;
+    CLOSE cur_vehiculos;
+END $$;
+
+
+-- 5.3 Balance de Dotación e Insumos por Categoría Operativa de Empleados
+DO $$
+DECLARE
+    cur_roles CURSOR FOR
+        SELECT 'LIMPIADOR' AS cargo UNION ALL
+        SELECT 'CONDUCTOR' UNION ALL
+        SELECT 'AYUDANTE';
+
+    cur_personal CURSOR(p_cargo VARCHAR) FOR
+        SELECT e.ci, e.nombre, e.paterno
+        FROM EMPLEADO e
+        WHERE (p_cargo = 'LIMPIADOR' AND EXISTS (SELECT 1 FROM LIMPIADOR l WHERE l.ci = e.ci))
+           OR (p_cargo = 'CONDUCTOR' AND EXISTS (SELECT 1 FROM CONDUCTOR c WHERE c.ci = e.ci))
+           OR (p_cargo = 'AYUDANTE' AND EXISTS (SELECT 1 FROM AYUDANTE a WHERE a.ci = e.ci))
+        LIMIT 2;
+
+    cur_entregas CURSOR(p_ci INT) FOR
+        SELECT i.nombre AS insumo, ent.cantidad, ent.fecha
+        FROM ENTREGA ent
+        JOIN INSUMO i ON ent.id_insumo = i.id_insumo
+        WHERE ent.ci = p_ci
+        ORDER BY ent.fecha DESC LIMIT 2;
+
+    reg_rol RECORD;
+    reg_emp RECORD;
+    reg_ent RECORD;
+BEGIN
+    RAISE NOTICE '=== REPORTE 5.3: DOTACIÓN DE INSUMOS POR ROL ===';
+    OPEN cur_roles;
+    LOOP
+        FETCH cur_roles INTO reg_rol;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE 'CARGO OPERATIVO: %', reg_rol.cargo;
+
+        OPEN cur_personal(reg_rol.cargo);
+        LOOP
+            FETCH cur_personal INTO reg_emp;
+            EXIT WHEN NOT FOUND;
+            RAISE NOTICE '   ├── EMPLEADO: [%] % %', reg_emp.ci, reg_emp.nombre, reg_emp.paterno;
+
+            OPEN cur_entregas(reg_emp.ci);
+            LOOP
+                FETCH cur_entregas INTO reg_ent;
+                EXIT WHEN NOT FOUND;
+                RAISE NOTICE '   │     └── Insumo Recibido: % | Cant: % | Fecha: %',
+                    reg_ent.insumo, reg_ent.cantidad, reg_ent.fecha;
+            END LOOP;
+            CLOSE cur_entregas;
+        END LOOP;
+        CLOSE cur_personal;
+    END LOOP;
+    CLOSE cur_roles;
+END $$;
+
+
+-- 5.4 Centros de Destino, Flota Asignada e Historial de Choferes
+DO $$
+DECLARE
+    cur_centros CURSOR FOR
+        SELECT id_centro, nombre, tipo FROM CENTRO_DESTINO ORDER BY id_centro LIMIT 3;
+
+    cur_flota CURSOR(p_centro INT) FOR
+        SELECT id_vehiculo, placa, modelo FROM VEHICULO WHERE id_centro = p_centro;
+
+    cur_conductores CURSOR(p_vehiculo INT) FOR
+        SELECT DISTINCT c.ci, e.nombre, e.paterno, con.fecha, con.turno
+        FROM CONDUCE con
+        JOIN CONDUCTOR c ON con.ci = c.ci
+        JOIN EMPLEADO e ON c.ci = e.ci
+        WHERE con.id_vehiculo = p_vehiculo
+        ORDER BY con.fecha DESC LIMIT 2;
+
+    reg_cen RECORD;
+    reg_cam RECORD;
+    reg_chof RECORD;
+BEGIN
+    RAISE NOTICE '=== REPORTE 5.4: CENTROS DE DESTINO Y CHOFERES POR UNIDAD ===';
+    OPEN cur_centros;
+    LOOP
+        FETCH cur_centros INTO reg_cen;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE 'CENTRO [%]: % (Tipo: %)', reg_cen.id_centro, reg_cen.nombre, reg_cen.tipo;
+
+        OPEN cur_flota(reg_cen.id_centro);
+        LOOP
+            FETCH cur_flota INTO reg_cam;
+            EXIT WHEN NOT FOUND;
+            RAISE NOTICE '   └── VEHICULO [%]: Placa: % (Modelo: %)',
+                reg_cam.id_vehiculo, reg_cam.placa, reg_cam.modelo;
+
+            OPEN cur_conductores(reg_cam.id_vehiculo);
+            LOOP
+                FETCH cur_conductores INTO reg_chof;
+                EXIT WHEN NOT FOUND;
+                RAISE NOTICE '         └── Chofer: [%] % % | Fecha: % | Turno: %',
+                    reg_chof.ci, reg_chof.nombre, reg_chof.paterno, reg_chof.fecha, reg_chof.turno;
+            END LOOP;
+            CLOSE cur_conductores;
+        END LOOP;
+        CLOSE cur_flota;
+    END LOOP;
+    CLOSE cur_centros;
+END $$;
+
+
+-- 5.5 Auditoría de Cobertura de Rutas y Personal de Limpieza Asignado
+DO $$
+DECLARE
+    cur_rutas_activas CURSOR FOR
+        SELECT id_ruta, descripcion, hora_inicio, hora_fin
+        FROM RUTA
+        ORDER BY id_ruta LIMIT 3;
+
+    cur_asignaciones CURSOR(p_ruta INT) FOR
+        SELECT elr.ci, e.nombre, e.paterno, elr.fecha, elr.turno
+        FROM E_LIM_RUTA elr
+        JOIN EMPLEADO e ON elr.ci = e.ci
+        WHERE elr.id_ruta = p_ruta
+        ORDER BY elr.fecha DESC LIMIT 3;
+
+    reg_rt RECORD;
+    reg_asig RECORD;
+BEGIN
+    RAISE NOTICE '=== REPORTE 5.5: AUDITORÍA DE LIMPIEZA POR RUTA ===';
+    OPEN cur_rutas_activas;
+    LOOP
+        FETCH cur_rutas_activas INTO reg_rt;
+        EXIT WHEN NOT FOUND;
+        RAISE NOTICE 'RUTA [%]: % (Horario: % - %)',
+            reg_rt.id_ruta, reg_rt.descripcion, reg_rt.hora_inicio, reg_rt.hora_fin;
+
+        OPEN cur_asignaciones(reg_rt.id_ruta);
+        LOOP
+            FETCH cur_asignaciones INTO reg_asig;
+            EXIT WHEN NOT FOUND;
+            RAISE NOTICE '   └── Limpiador: [%] % % | Asignado el: % (Turno: %)',
+                reg_asig.ci, reg_asig.nombre, reg_asig.paterno, reg_asig.fecha, reg_asig.turno;
+        END LOOP;
+        CLOSE cur_asignaciones;
+    END LOOP;
+    CLOSE cur_rutas_activas;
+END $$;
+================================================================================
+ FIN DEL ARCHIVO DE PROGRAMACIÓN AVANZADA
+================================================================================

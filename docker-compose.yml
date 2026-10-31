@@ -1,0 +1,87 @@
+﻿services:
+  # ========================================================
+  # GESTOR 1: POSTGRESQL (Puerto 5433)
+  # ========================================================
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: contenedor_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: grupo4_recoleccion
+      POSTGRES_PASSWORD: grupo4
+      POSTGRES_DB: bd_recoleccion
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts_init/01_postgres_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    networks:
+      - red-multigestor
+
+  # ========================================================
+  # GESTOR 2: MYSQL (Puerto 3307)
+  # ========================================================
+  mysql-db:
+    image: mysql:8.0
+    container_name: contenedor_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: bd_recoleccion
+      MYSQL_USER: grupo4_recoleccion
+      MYSQL_PASSWORD: grupo4
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts_init/02_mysql_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    networks:
+      - red-multigestor
+
+  # ========================================================
+  # GESTOR 3: SQL SERVER (Puerto 1433)
+  # ========================================================
+  sqlserver-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: contenedor_sqlserver
+    restart: always
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "AdminPasswordGrupo4!"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - ./scripts_init:/docker-init
+    networks:
+      - red-multigestor
+
+  # ========================================================
+  # GESTOR 4: ORACLE 23ai FREE SLIM (Puerto 1522)
+  # ========================================================
+  oracle-db:
+    image: gvenzl/oracle-free:23-slim
+    container_name: contenedor_oracle
+    restart: always
+    environment:
+      ORACLE_PASSWORD: grupo4
+      ORACLE_DATABASE: FREEPDB1
+      APP_USER: grupo4_recoleccion
+      APP_USER_PASSWORD: grupo4
+    ports:
+      - "1522:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./scripts_init/04_oracle_init.sql:/container-entrypoint-initdb.d/01_init.sql
+    networks:
+      - red-multigestor
+
+networks:
+  red-multigestor:
+    driver: bridge
+
+volumes:
+  pg_data:
+  mysql_data:
+  mssql_data:
+  oracle_data:
