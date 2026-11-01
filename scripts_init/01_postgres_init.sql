@@ -6658,7 +6658,7 @@ BEGIN
 END;
 $$;
 
-
+-----------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION fn_auditoria_consumo_insumos_empleado(
     p_ci_empleado INT,
     p_gestion INT DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)
@@ -6714,14 +6714,14 @@ BEGIN
 
     RETURN QUERY
     SELECT 
-        v_total_emp,
-        v_frecuencia,
-        COALESCE(v_insumo_pred, 'Sin registros'),
-        ROUND(v_promedio_area, 2),
-        CASE 
+        v_total_emp::INT,
+        v_frecuencia::INT,
+        COALESCE(v_insumo_pred, 'Sin registros')::VARCHAR,
+        ROUND(v_promedio_area, 2)::NUMERIC(10,2),
+        (CASE 
             WHEN v_promedio_area > 0 AND v_total_emp > (v_promedio_area * 1.25) THEN 'SOBRECONSUMO'
             ELSE 'ESTÁNDAR'
-        END;
+        END)::VARCHAR(20);
 END;
 $$ LANGUAGE plpgsql;
 
@@ -6818,7 +6818,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $$;
-
+-------------------------------------------------------
 
 -- 3. TRIGGERS Y TABLA DE AUDITORÍA
 CREATE TABLE IF NOT EXISTS auditoria_salarios (
