@@ -6658,6 +6658,74 @@ BEGIN
 END;
 $$;
 
+
+CREATE OR REPLACE FUNCTION fn_auditoria_consumo_insumos_empleado(
+    p_ci_empleado INT,
+    p_gestion INT DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)
+)
+RETURNS TABLE (
+    total_unidades_recibidas INT,
+    frecuencia_solicitudes INT,
+    insumo_predominante VARCHAR,
+    promedio_operarios_area NUMERIC(10,2),
+    clasificacion_consumo VARCHAR(20)
+) AS $$
+DECLARE
+    v_rol VARCHAR(20);
+    v_total_emp INT;
+    v_frecuencia INT;
+    v_insumo_pred VARCHAR(60);
+    v_promedio_area NUMERIC(10,2);
+BEGIN
+
+    SELECT 'CONDUCTOR' INTO v_rol FROM CONDUCTOR WHERE ci = p_ci_empleado;
+    IF NOT FOUND THEN SELECT 'AYUDANTE' INTO v_rol FROM AYUDANTE WHERE ci = p_ci_empleado; END IF;
+    IF NOT FOUND THEN SELECT 'LIMPIADOR' INTO v_rol FROM LIMPIADOR WHERE ci = p_ci_empleado; END IF;
+
+    SELECT COALESCE(SUM(cantidad), 0), COUNT(DISTINCT fecha)
+    INTO v_total_emp, v_frecuencia
+    FROM ENTREGA
+    WHERE ci = p_ci_empleado AND EXTRACT(YEAR FROM fecha) = p_gestion;
+
+    SELECT i.nombre INTO v_insumo_pred
+    FROM ENTREGA e
+    JOIN INSUMO i ON e.id_insumo = i.id_insumo
+    WHERE e.ci = p_ci_empleado AND EXTRACT(YEAR FROM e.fecha) = p_gestion
+    GROUP BY i.nombre
+    ORDER BY SUM(e.cantidad) DESC
+    LIMIT 1;
+
+    IF v_rol = 'CONDUCTOR' THEN
+        SELECT COALESCE(AVG(total), 0) INTO v_promedio_area FROM (
+            SELECT SUM(e.cantidad) as total FROM ENTREGA e JOIN CONDUCTOR c ON e.ci = c.ci 
+            WHERE EXTRACT(YEAR FROM e.fecha) = p_gestion AND e.ci <> p_ci_empleado GROUP BY e.ci
+        ) sub;
+    ELSIF v_rol = 'AYUDANTE' THEN
+        SELECT COALESCE(AVG(total), 0) INTO v_promedio_area FROM (
+            SELECT SUM(e.cantidad) as total FROM ENTREGA e JOIN AYUDANTE a ON e.ci = a.ci 
+            WHERE EXTRACT(YEAR FROM e.fecha) = p_gestion AND e.ci <> p_ci_empleado GROUP BY e.ci
+        ) sub;
+    ELSE
+        SELECT COALESCE(AVG(total), 0) INTO v_promedio_area FROM (
+            SELECT SUM(e.cantidad) as total FROM ENTREGA e JOIN LIMPIADOR l ON e.ci = l.ci 
+            WHERE EXTRACT(YEAR FROM e.fecha) = p_gestion AND e.ci <> p_ci_empleado GROUP BY e.ci
+        ) sub;
+    END IF;
+
+    RETURN QUERY
+    SELECT 
+        v_total_emp,
+        v_frecuencia,
+        COALESCE(v_insumo_pred, 'Sin registros'),
+        ROUND(v_promedio_area, 2),
+        CASE 
+            WHEN v_promedio_area > 0 AND v_total_emp > (v_promedio_area * 1.25) THEN 'SOBRECONSUMO'
+            ELSE 'ESTÁNDAR'
+        END;
+END;
+$$ LANGUAGE plpgsql;
+
+
 -- 2. PROCEDIMIENTOS ALMACENADOS
 CREATE OR REPLACE PROCEDURE sp_registrar_entrega_insumo(p_id_insumo INT, p_ci INT, p_cantidad INT)
 LANGUAGE plpgsql AS $$
@@ -6699,6 +6767,59 @@ BEGIN
 END;
 $$;
 
+
+CREATE OR REPLACE PROCEDURE sp_distribuir_insumos_turno(
+    p_fecha DATE, 
+    p_turno VARCHAR, 
+    p_incluir_herramientas BOOLEAN, 
+    OUT p_operarios_dotados INT, 
+    OUT p_total_unidades_entregadas INT, 
+    OUT p_mensaje VARCHAR
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_ci INT; 
+    v_rol VARCHAR(20);
+    cur_operarios CURSOR FOR
+        SELECT ci, 'CONDUCTOR' FROM CONDUCTOR 
+        UNION ALL 
+        SELECT ci, 'AYUDANTE' FROM AYUDANTE WHERE turno = p_turno
+        UNION ALL 
+        SELECT ci, 'LIMPIADOR' FROM LIMPIADOR WHERE turno = p_turno;
+BEGIN
+    p_operarios_dotados := 0; 
+    p_total_unidades_entregadas := 0;
+    
+    OPEN cur_operarios;
+    LOOP
+        FETCH cur_operarios INTO v_ci, v_rol;
+        EXIT WHEN NOT FOUND;
+        
+        INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (6, v_ci, p_fecha, 2);  
+        INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (33, v_ci, p_fecha, 5);
+        INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (14, v_ci, p_fecha, 1); 
+        INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (10, v_ci, p_fecha, 1); 
+        
+        p_total_unidades_entregadas := p_total_unidades_entregadas + 9;
+
+        IF p_incluir_herramientas AND v_rol = 'LIMPIADOR' THEN
+            INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (39, v_ci, p_fecha, 1); 
+            INSERT INTO ENTREGA (id_insumo, ci, fecha, cantidad) VALUES (42, v_ci, p_fecha, 1); 
+            p_total_unidades_entregadas := p_total_unidades_entregadas + 2;
+        END IF;
+        
+        p_operarios_dotados := p_operarios_dotados + 1;
+    END LOOP;
+    CLOSE cur_operarios;
+    
+    p_mensaje := 'Dotación masiva de EPPs completada exitosamente.';
+EXCEPTION WHEN OTHERS THEN
+    p_mensaje := 'Error: ' || SQLERRM; 
+    RAISE;
+END;
+$$;
+
+
 -- 3. TRIGGERS Y TABLA DE AUDITORÍA
 CREATE TABLE IF NOT EXISTS auditoria_salarios (
     id_auditoria SERIAL PRIMARY KEY,
@@ -6739,6 +6860,31 @@ $$;
 CREATE TRIGGER trg_control_stock_insumos
 BEFORE INSERT ON ENTREGA
 FOR EACH ROW EXECUTE FUNCTION fn_trg_control_stock_insumos();
+
+---------------------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION fn_tg_control_y_descuento_stock()
+RETURNS TRIGGER AS $$
+DECLARE 
+    v_stock_actual INT;
+BEGIN
+    SELECT cantidad INTO v_stock_actual FROM INSUMO WHERE id_insumo = NEW.id_insumo FOR UPDATE;
+    
+    IF NEW.cantidad > v_stock_actual THEN
+        RAISE EXCEPTION 'Stock insuficiente en almacén. Insumo ID: %. Solicitado: %, Disponible: %', NEW.id_insumo, NEW.cantidad, v_stock_actual;
+    END IF;
+    
+    UPDATE INSUMO SET cantidad = cantidad - NEW.cantidad WHERE id_insumo = NEW.id_insumo;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tg_control_y_descuento_stock_insumo ON ENTREGA;
+CREATE TRIGGER tg_control_y_descuento_stock_insumo
+BEFORE INSERT ON ENTREGA 
+FOR EACH ROW 
+EXECUTE FUNCTION fn_tg_control_y_descuento_stock();
+--------------------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION fn_trg_auditoria_cambio_salario()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
