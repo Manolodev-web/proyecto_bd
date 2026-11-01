@@ -6613,13 +6613,74 @@ CREATE TABLE test_conexion (
   fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS historial_contenedor (
+    id_historial SERIAL PRIMARY KEY,
+    id_contenedor INT NOT NULL,
+    id_ruta_anterior INT NOT NULL,
+    id_ruta_nueva INT NOT NULL,
+    nueva_ubicacion VARCHAR(150),
+    latitud NUMERIC(10, 8),
+    longitud NUMERIC(11, 8),
+    motivo VARCHAR(255),
+    fecha_movimiento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_hist_contenedor FOREIGN KEY (id_contenedor) REFERENCES CONTENEDOR(id_contenedor)
+);
+
 INSERT INTO test_conexion (mensaje) VALUES ('Conexion exitosa a PostgreSQL Grupo 4 - 18 Tablas Cargadas');
 
+INSERT INTO HISTORIAL_CONTENEDOR (id_contenedor, id_ruta_anterior, id_ruta_nueva, nueva_ubicacion, latitud, longitud, motivo) 
+VALUES (1, 1, 2, 'Av. Principal 123 (Zona Sur)', -16.50000000, -68.15000000, 'Prueba de inserción inicial de trazabilidad - Grupo 4');
 -- =========================================================================
 -- RUTINAS PRECARGADAS (FUNCIONES, PROCEDIMIENTOS Y TRIGGERS)
 -- =========================================================================
 
 -- 1. FUNCIONES
+CREATE OR REPLACE FUNCTION fn_indice_saturacion_ruta(p_id_ruta INT)
+RETURNS TABLE (
+    id_ruta INT,
+    capacidad_actual_litros INT,
+    tope_maximo_litros INT,
+    porcentaje_saturacion NUMERIC(5, 2),
+    estado_ruta VARCHAR(30)
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_capacidad_actual INT := 0;
+    v_tope_maximo INT := 50000; -- Límite máximo estándar por ruta en litros (ajustable)
+    v_porcentaje NUMERIC(5, 2);
+    v_estado VARCHAR(30);
+BEGIN
+    SELECT COALESCE(SUM(capacidad), 0)
+    INTO v_capacidad_actual
+    FROM CONTENEDOR
+    WHERE CONTENEDOR.id_ruta = p_id_ruta;
+
+    IF v_tope_maximo > 0 THEN
+        v_porcentaje := ROUND((v_capacidad_actual::NUMERIC / v_tope_maximo::NUMERIC) * 100, 2);
+    ELSE
+        v_porcentaje := 0.00;
+    END IF;
+
+    -- 3. Determinar el estado de saturación de la ruta
+    IF v_porcentaje >= 100.00 THEN
+        v_estado := 'SATURADA / SOBRECARGADA';
+    ELSIF v_porcentaje >= 80.00 THEN
+        v_estado := 'ALERTA / RIESGO ALTO';
+    ELSE
+        v_estado := 'OPTIMA / CAPACIDAD DISPONIBLE';
+    END IF;
+
+    id_ruta := p_id_ruta;
+    capacidad_actual_litros := v_capacidad_actual;
+    tope_maximo_litros := v_tope_maximo;
+    porcentaje_saturacion := v_porcentaje;
+    estado_ruta := v_estado;
+
+    RETURN NEXT;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION fn_calcular_antiguedad_empleado(p_ci INT)
 RETURNS INT LANGUAGE plpgsql AS $$
 DECLARE
@@ -6742,6 +6803,78 @@ BEGIN
     VALUES (p_id_insumo, p_ci, CURRENT_DATE, p_cantidad)
     ON CONFLICT (id_insumo, ci, fecha) DO UPDATE SET cantidad = ENTREGA.cantidad + EXCLUDED.cantidad;
     UPDATE INSUMO SET cantidad = cantidad - p_cantidad WHERE id_insumo = p_id_insumo;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_reasignar_contenedor(
+    IN p_id_contenedor INT,
+    IN p_id_ruta_nueva INT,
+    IN p_nueva_ubicacion VARCHAR,
+    IN p_latitud NUMERIC,
+    IN p_longitud NUMERIC,
+    IN p_motivo VARCHAR,
+    OUT p_codigo_resultado INT,
+    OUT p_mensaje_estado VARCHAR
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_estado_actual VARCHAR(20);
+    v_ruta_anterior INT;
+    v_capacidad_contenedor INT;
+    v_capacidad_actual_ruta INT;
+    v_tope_maximo_ruta INT := 50000; -- Capacidad máxima en litros por ruta (ajustable)
+BEGIN
+    SELECT estado, id_ruta, capacidad 
+    INTO v_estado_actual, v_ruta_anterior, v_capacidad_contenedor
+    FROM CONTENEDOR
+    WHERE id_contenedor = p_id_contenedor
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        p_codigo_resultado := -2;
+        p_mensaje_estado := 'El contenedor especificado no existe.';
+        RETURN;
+    END IF;
+
+    IF v_estado_actual IN ('MALO', 'EN REPARACION') THEN
+        p_codigo_resultado := -1;
+        p_mensaje_estado := 'Operación rechazada: El contenedor se encuentra dañado o inhabilitado.';
+        RETURN;
+    END IF;
+
+    SELECT COALESCE(SUM(capacidad), 0)
+    INTO v_capacidad_actual_ruta
+    FROM CONTENEDOR
+    WHERE id_ruta = p_id_ruta_nueva;
+
+    IF (v_capacidad_actual_ruta + v_capacidad_contenedor) > v_tope_maximo_ruta THEN
+        p_codigo_resultado := 0;
+        p_mensaje_estado := 'Ruta destino saturada. Excede la capacidad máxima permitida.';
+        RETURN;
+    END IF;
+
+    UPDATE CONTENEDOR
+    SET id_ruta = p_id_ruta_nueva,
+        ubicacion = p_nueva_ubicacion
+    WHERE id_contenedor = p_id_contenedor;
+
+    INSERT INTO historial_contenedor (
+        id_contenedor, id_ruta_anterior, id_ruta_nueva, 
+        nueva_ubicacion, latitud, longitud, motivo
+    ) VALUES (
+        p_id_contenedor, v_ruta_anterior, p_id_ruta_nueva, 
+        p_nueva_ubicacion, p_latitud, p_longitud, p_motivo
+    );
+
+    p_codigo_resultado := 1;
+    p_mensaje_estado := 'Contenedor reasignado y ubicado exitosamente.';
+    COMMIT;
+
+EXCEPTION WHEN OTHERS THEN
+    ROLLBACK;
+    p_codigo_resultado := -99;
+    p_mensaje_estado := 'Error interno en el motor: ' || SQLERRM;
 END;
 $$;
 
@@ -6902,3 +7035,52 @@ AFTER UPDATE OF salario ON EMPLEADO
 FOR EACH ROW EXECUTE FUNCTION fn_trg_auditoria_cambio_salario();
 
 COMMIT;
+
+CREATE OR REPLACE FUNCTION cr_reporte_desgaste_contenedores()
+RETURNS TABLE (
+    id_contenedor INT,
+    ubicacion VARCHAR,
+    estado_actual VARCHAR,
+    nivel_desgaste INT,
+    semaforo_mantenimiento VARCHAR
+) 
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    cur_desgaste CURSOR FOR 
+        SELECT c.id_contenedor, c.ubicacion, c.estado, COALESCE(c.porcentaje_llenado, 0)
+        FROM CONTENEDOR c;
+        
+    v_id INT;
+    v_ubicacion VARCHAR(150);
+    v_estado VARCHAR(20);
+    v_llenado INT;
+    v_semaforo VARCHAR(30);
+BEGIN
+    OPEN cur_desgaste;
+    
+    LOOP
+        FETCH cur_desgaste INTO v_id, v_ubicacion, v_estado, v_llenado;
+        EXIT WHEN NOT FOUND;
+
+        IF v_estado IN ('MALO', 'EN REPARACION') THEN
+            v_semaforo := 'ROJO - CRITICO (Reparacion)';
+        ELSIF v_llenado >= 85 THEN
+            v_semaforo := 'AMARILLO - ALERTA (Alto llenado)';
+        ELSE
+            v_semaforo := 'VERDE - OPTIMO';
+        END IF;
+
+        id_contenedor := v_id;
+        ubicacion := v_ubicacion;
+        estado_actual := v_estado;
+        nivel_desgaste := v_llenado;
+        semaforo_mantenimiento := v_semaforo;
+        
+        RETURN NEXT;
+    END LOOP;
+    
+    CLOSE cur_desgaste;
+END;
+$$;
+SELECT * FROM cr_reporte_desgaste_contenedores();

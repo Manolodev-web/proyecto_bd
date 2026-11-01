@@ -2,6 +2,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import { probarConexion, ejecutarConsulta } from "./conexiones/db.js";
+import contenedoresRouter from "./modules/contenedor_ruta.js";
 
 dotenv.config();
 
@@ -11,11 +12,12 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
+// Endpoint de estado del servidor
 app.get("/api/health", (req, res) => {
   res.json({ estado: "OK", mensaje: "Servidor Backend Grupo 4 activo" });
 });
 
-// Endpoint de prueba de conexión
+// Endpoint de prueba de conexión general
 app.post("/api/conectar", async (req, res) => {
   const { gestor } = req.body;
   try {
@@ -26,7 +28,7 @@ app.post("/api/conectar", async (req, res) => {
   }
 });
 
-// Endpoint de ejecución de consultas SQL
+// Endpoint de ejecución de consultas SQL generales
 app.post("/api/query", async (req, res) => {
   const { gestor, sql } = req.body;
 
@@ -58,6 +60,7 @@ app.post("/api/query", async (req, res) => {
   }
 });
 
+app.use("/api/contenedores", contenedoresRouter);
 app.listen(PORT, () => {
   console.log(`====================================================`);
   console.log(` Servidor Backend Grupo 4 activo en http://localhost:${PORT}`);
