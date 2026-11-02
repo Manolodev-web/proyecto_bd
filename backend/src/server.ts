@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { probarConexion, ejecutarConsulta } from "./conexiones/db.js";
 import contenedoresRouter from "./modules/contenedor_ruta.js";
+import almacenRouter from "./modules/almacen_ruta.js";
 
 dotenv.config();
 
@@ -61,7 +62,7 @@ app.post("/api/query", async (req, res) => {
 });
 
 app.use("/api/contenedores", contenedoresRouter);
-
+app.use("/api/almacen", almacenRouter);
 /*
 // ENDPOINTS PARA EL MÓDULO 3 (Flota, Talleres y Contingencias)
 
