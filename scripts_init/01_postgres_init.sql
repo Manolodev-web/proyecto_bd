@@ -7084,3 +7084,288 @@ BEGIN
 END;
 $$;
 SELECT * FROM cr_reporte_desgaste_contenedores();
+
+--parte de vehiculos
+-- ================
+--1.
+
+CREATE OR REPLACE PROCEDURE sp_baja_vehiculo_y_contingencia(
+  IN p_id_vehiculo INT,
+  IN p_id_centro_destino INT,
+  IN p_motivo_mantenimiento VARCHAR,
+  IN p_kilometraje_actual NUMERIC,
+  OUT p_codigo_resultado INT,
+  OUT p_rutas_reasignadas INT,
+  OUT p_mensaje_estado VARCHAR
+)
+AS $$
+DECLARE
+  v_estado_vehiculo VARCHAR(50);
+  v_tiene_ruta_activa INT;
+  v_ruta_reg RECORD;
+  v_camion_reemplazo INT;
+  v_contador_reemplazos INT := 0;
+
+  cur_rutas_pendientes CURSOR FOR
+    SELECT id_ruta, fecha, turno
+    FROM ABARCA
+    WHERE id_vehiculo = p_id_vehiculo
+      AND fecha >= CURRENT_DATE;
+BEGIN
+  p_rutas_reasignadas := 0;
+
+  SELECT estado INTO v_estado_vehiculo
+  FROM VEHICULO
+  WHERE id_vehiculo = p_id_vehiculo;
+
+  IF v_estado_vehiculo IS NULL THEN
+    p_codigo_resultado := -1;
+    p_mensaje_estado := 'Error: El vehículo especificado no existe.';
+    RETURN;
+  END IF;
+
+  IF v_estado_vehiculo = 'EN TALLER' THEN
+    p_codigo_resultado := 0;
+    p_mensaje_estado := 'El vehículo ya se encuentra registrado en taller.';
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) INTO v_tiene_ruta_activa
+  FROM ABARCA
+  WHERE id_vehiculo = p_id_vehiculo
+    AND fecha = CURRENT_DATE;
+
+  
+  UPDATE VEHICULO
+  SET estado = 'EN TALLER',
+      kilometraje = COALESCE(p_kilometraje_actual, kilometraje)
+  WHERE id_vehiculo = p_id_vehiculo;
+
+  
+  INSERT INTO TALLER_VEHICULO (id_vehiculo, id_taller, motivo, tipo_falla, estado, fecha_ingreso)
+  VALUES (p_id_vehiculo, p_id_centro_destino, p_motivo_mantenimiento, 'MECANICA', 'EN_REPARACION', CURRENT_TIMESTAMP);
+
+  
+  OPEN cur_rutas_pendientes;
+  LOOP
+    FETCH cur_rutas_pendientes INTO v_ruta_reg;
+    EXIT WHEN NOT FOUND;
+
+    
+    SELECT id_vehiculo INTO v_camion_reemplazo
+    FROM VEHICULO
+    WHERE estado = 'DISPONIBLE'
+      AND id_vehiculo <> p_id_vehiculo
+      AND id_vehiculo NOT IN (
+        SELECT id_vehiculo 
+        FROM ABARCA 
+        WHERE fecha = v_ruta_reg.fecha AND turno = v_ruta_reg.turno
+      )
+    ORDER BY kilometraje ASC
+    LIMIT 1;
+
+    
+    IF v_camion_reemplazo IS NOT NULL THEN
+      DELETE FROM ABARCA
+      WHERE id_vehiculo = p_id_vehiculo 
+        AND id_ruta = v_ruta_reg.id_ruta 
+        AND fecha = v_ruta_reg.fecha 
+        AND turno = v_ruta_reg.turno;
+
+      
+      INSERT INTO ABARCA (id_vehiculo, id_ruta, fecha, turno)
+      VALUES (v_camion_reemplazo, v_ruta_reg.id_ruta, v_ruta_reg.fecha, v_ruta_reg.turno);
+
+      v_contador_reemplazos := v_contador_reemplazos + 1;
+    END IF;
+  END LOOP;
+  CLOSE cur_rutas_pendientes;
+
+  
+  p_codigo_resultado := 1;
+  p_rutas_reasignadas := v_contador_reemplazos;
+  p_mensaje_estado := CONCAT('Vehículo enviado a taller exitosamente. Se reasignaron ', v_contador_reemplazos, ' ruta(s) pendiente(s) a unidades disponibles.');
+
+EXCEPTION
+  WHEN OTHERS THEN
+    p_codigo_resultado := -1;
+    p_rutas_reasignadas := 0;
+    p_mensaje_estado := CONCAT('Error crítico en el procedimiento de baja y contingencia: ', SQLERRM);
+END;
+$$ LANGUAGE plpgsql;
+
+--2.
+-- ====================
+
+CREATE OR REPLACE FUNCTION fn_verificar_disponibilidad_vehiculo(
+  p_id_vehiculo INT,
+  p_fecha DATE,
+  p_turno VARCHAR
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+v_estado_vehiculo VARCHAR(50);
+v_asignado INT;
+BEGIN
+
+SELECT estado INTO v_estado_vehiculo
+FROM VEHICULO
+WHERE id_vehiculo = p_id_vehiculo;
+
+IF v_estado_vehiculo IS NULL OR UPPER(v_estado_vehiculo) <> 'DISPONIBLE' THEN
+  RETURN FALSE; 
+END IF;
+
+SELECT COUNT(*) INTO v_asignado
+FROM ABARCA
+WHERE id_vehiculo = p_id_vehiculo
+  AND fecha = p_fecha
+  AND UPPER(turno) = UPPER(p_turno);
+
+IF v_asignado > 0 THEN
+  RETURN FALSE; 
+END IF;
+
+
+RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+--3.
+-- ==========================
+
+CREATE OR REPLACE FUNCTION cr_auditoria_carga_trabajo_vehiculo(
+  p_fecha_inicio DATE,
+  p_fecha_fin DATE
+)
+RETURNS TABLE (
+  id_vehiculo INT,
+  placa VARCHAR,
+  modelo VARCHAR,
+  estado VARCHAR,
+  total_rutas_asignadas BIGINT,
+  kilometraje_total_recorrido NUMERIC,
+  desviacion_flota_pct NUMERIC
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_promedio_km NUMERIC := 0;
+  r_audit RECORD;
+  
+  
+  cur_auditoria_flota CURSOR FOR
+    SELECT 
+      v.id_vehiculo,
+      v.placa,
+      COALESCE(v.modelo, 'N/A') AS modelo,
+      v.estado,
+      COUNT(a.id_ruta) AS total_rutas,
+      COALESCE(SUM(r.distancia_km), 0) AS km_total
+    FROM VEHICULO v
+    LEFT JOIN ABARCA a ON v.id_vehiculo = a.id_vehiculo 
+      AND a.fecha BETWEEN p_fecha_inicio AND p_fecha_fin
+    LEFT JOIN RUTA r ON a.id_ruta = r.id_ruta
+    GROUP BY v.id_vehiculo, v.placa, v.modelo, v.estado;
+
+BEGIN
+  
+  SELECT COALESCE(AVG(sub.km_camion), 0) INTO v_promedio_km
+  FROM (
+    SELECT SUM(r_sub.distancia_km) AS km_camion
+    FROM VEHICULO v_sub
+    LEFT JOIN ABARCA a_sub ON v_sub.id_vehiculo = a_sub.id_vehiculo 
+      AND a_sub.fecha BETWEEN p_fecha_inicio AND p_fecha_fin
+    LEFT JOIN RUTA r_sub ON a_sub.id_ruta = r_sub.id_ruta
+    GROUP BY v_sub.id_vehiculo
+  ) sub;
+
+  
+  OPEN cur_auditoria_flota;
+  LOOP
+    FETCH cur_auditoria_flota INTO r_audit;
+    EXIT WHEN NOT FOUND;
+
+    id_vehiculo                 := r_audit.id_vehiculo;
+    placa                       := r_audit.placa;
+    modelo                      := r_audit.modelo;
+    estado                      := r_audit.estado;
+    total_rutas_asignadas       := r_audit.total_rutas;
+    kilometraje_total_recorrido := r_audit.km_total;
+
+   
+    IF v_promedio_km > 0 THEN
+      desviacion_flota_pct := ROUND(((r_audit.km_total - v_promedio_km) / v_promedio_km) * 100, 2);
+    ELSE
+      desviacion_flota_pct := 0.00;
+    END IF;
+
+    RETURN NEXT;
+  END LOOP;
+  CLOSE cur_auditoria_flota;
+
+END;
+$$;
+
+--4
+-- =========================================================================
+
+-- 1. Creación de la tabla de bitácora inmutable para trazabilidad mecánica y operativa
+CREATE TABLE IF NOT EXISTS AUDITORIA_FLOTA (
+  id_auditoria          SERIAL PRIMARY KEY,
+  id_vehiculo           INT NOT NULL,
+  estado_anterior       VARCHAR(50) NOT NULL,
+  estado_nuevo          VARCHAR(50) NOT NULL,
+  fecha_cambio          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  usuario               VARCHAR(100) NOT NULL DEFAULT CURRENT_USER,
+  horas_desde_ultimo_cambio NUMERIC(10,2) NULL,
+  CONSTRAINT fk_auditoria_vehiculo FOREIGN KEY (id_vehiculo) REFERENCES VEHICULO(id_vehiculo)
+);
+
+-- Función del Trigger 
+CREATE OR REPLACE FUNCTION fn_trg_auditoria_estado_vehiculo()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_ultima_fecha TIMESTAMP;
+  v_horas_transcurridas NUMERIC(10,2) := 0;
+BEGIN
+  
+  SELECT MAX(fecha_cambio) INTO v_ultima_fecha
+  FROM AUDITORIA_FLOTA
+  WHERE id_vehiculo = NEW.id_vehiculo;
+
+  
+  IF v_ultima_fecha IS NOT NULL THEN
+    v_horas_transcurridas := EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - v_ultima_fecha)) / 3600.0;
+  END IF;
+
+  
+  INSERT INTO AUDITORIA_FLOTA (
+    id_vehiculo, 
+    estado_anterior, 
+    estado_nuevo, 
+    fecha_cambio, 
+    usuario, 
+    horas_desde_ultimo_cambio
+  )
+  VALUES (
+    NEW.id_vehiculo, 
+    OLD.estado, 
+    NEW.estado, 
+    CURRENT_TIMESTAMP, 
+    CURRENT_USER, 
+    v_horas_transcurridas
+  );
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+DROP TRIGGER IF EXISTS tg_auditoria_estado_vehiculo ON VEHICULO;
+CREATE TRIGGER tg_auditoria_estado_vehiculo
+AFTER UPDATE OF estado ON VEHICULO
+FOR EACH ROW
+WHEN (OLD.estado IS DISTINCT FROM NEW.estado)
+EXECUTE FUNCTION fn_trg_auditoria_estado_vehiculo();
