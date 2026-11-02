@@ -1,10 +1,8 @@
 import { Router, Request, Response } from "express";
-// Importamos la función universal y el tipo de dato desde su carpeta config
 import { ejecutarUniversal, QueryDefinition } from "../config/db.js"; 
 
 const router = Router();
 
-// 1. Obtener Insumos
 router.get("/insumos", async (req: Request, res: Response) => {
   const gestor = (req.query.gestor as string) || "postgres";
   try {
@@ -21,7 +19,6 @@ router.get("/insumos", async (req: Request, res: Response) => {
   }
 });
 
-// 2. Registrar Entrega (Trigger)
 router.post("/entregas", async (req: Request, res: Response) => {
   const { id_insumo, ci, fecha, cantidad, gestor } = req.body;
   try {
@@ -38,7 +35,6 @@ router.post("/entregas", async (req: Request, res: Response) => {
   }
 });
 
-// 3. Distribuir Turno Masivo (Procedimiento)
 router.post("/distribuir-turno", async (req: Request, res: Response) => {
   const { fecha, turno, incluirHerramientas, gestor } = req.body;
   try {
@@ -49,10 +45,9 @@ router.post("/distribuir-turno", async (req: Request, res: Response) => {
       oracle: { sql: "BEGIN sp_distribuir_insumos_turno(:1, :2, :3); END;", binds: [fecha, turno, incluirHerramientas ? 1 : 0] }
     };
     
-    // En Postgres, los procedimientos con OUT params devuelven filas
+
     const result = await ejecutarUniversal(gestor || "postgres", queryDef);
     
-    // El resultado de ejecutarUniversal en Postgres para un CALL devuelve las filas
     const filaResultado = Array.isArray(result) ? result[0] : result;
     
     res.json({ 
@@ -66,7 +61,7 @@ router.post("/distribuir-turno", async (req: Request, res: Response) => {
   }
 });
 
-// 4. Kardex por Empleado (Función)
+
 router.get("/kardex/:ci", async (req: Request, res: Response) => {
   const { ci } = req.params;
   const { anio, gestor } = req.query;
