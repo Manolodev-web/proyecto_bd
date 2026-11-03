@@ -1,112 +1,73 @@
+// backend/src/config/db.ts
 import { Pool as PgPool } from "pg";
 import mysql from "mysql2/promise";
 import sql from "mssql";
 import oracledb from "oracledb";
-import dotenv from "dotenv";
+import { obtenerConfiguracion } from "../conexiones/db.js";
 
-dotenv.config();
-
-// 1. Pool PostgreSQL
-export const pgPool = new PgPool({
-  host: process.env.PG_HOST || "localhost",
-  port: Number(process.env.PG_PORT) || 5432,
-  user: process.env.PG_USER || "postgres",
-  password: process.env.PG_PASSWORD || "postgres",
-  database: process.env.PG_DATABASE || "recoleccion_lp"
-});
-
-// 2. Pool MySQL
-export const mysqlPool = mysql.createPool({
-  host: process.env.MYSQL_HOST || "localhost",
-  port: Number(process.env.MYSQL_PORT) || 3306,
-  user: process.env.MYSQL_USER || "root",
-  password: process.env.MYSQL_PASSWORD || "root",
-  database: process.env.MYSQL_DATABASE || "recoleccion_lp",
-  waitForConnections: true,
-  connectionLimit: 10
-});
-
-// 3. Pool SQL Server
-const sqlServerConfig: sql.config = {
-  user: process.env.SQLSERVER_USER || "sa",
-  password: process.env.SQLSERVER_PASSWORD || "TuPasswordSeguro123!",
-  server: process.env.SQLSERVER_HOST || "localhost",
-  port: Number(process.env.SQLSERVER_PORT) || 1433,
-  database: process.env.SQLSERVER_DATABASE || "recoleccion_lp",
-  options: {
-    encrypt: false,
-    trustServerCertificate: true
-  }
-};
-export const sqlServerPool = new sql.ConnectionPool(sqlServerConfig);
-let sqlServerConnected = false;
-
-// 4. Inicializador Oracle
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
 
-// Interfaz que define la consulta para cada motor
 export interface QueryDefinition {
-  postgres: { sql: string; params: any[] };
-  mysql: { sql: string; params: any[] };
-  sqlserver: { sql: string; params?: { name: string; type: any; value: any }[] };
+  postgres: { sql: string; params?: any[] };
+  mysql: { sql: string; params?: any[] };
+  sqlserver: { sql: string; params?: any[] };
   oracle: { sql: string; binds?: any };
 }
 
-/**
- * Función que despacha la consulta al motor activo
- */
-export async function ejecutarUniversal(gestor: string, queryDef: QueryDefinition): Promise<any> {
+export async function ejecutarUniversal(
+  gestor: string,
+  queryDef: QueryDefinition,
+  entorno: string = "docker"
+): Promise<any> {
   const motor = (gestor || "postgres").toLowerCase();
+  const cfg = obtenerConfiguracion(motor, entorno) as any;
 
   switch (motor) {
     case "postgres": {
-      const client = await pgPool.connect();
+      const pool = new PgPool({ ...cfg, connectionTimeoutMillis: 5000 });
       try {
-        const res = await client.query(queryDef.postgres.sql, queryDef.postgres.params);
+        const res = await pool.query(queryDef.postgres.sql, queryDef.postgres.params || []);
         return res.rows;
       } finally {
-        client.release();
+        await pool.end();
       }
     }
 
     case "mysql": {
-      const [rows] = await mysqlPool.query(queryDef.mysql.sql, queryDef.mysql.params);
-      return rows;
+      const conexion = await mysql.createConnection({ ...cfg, connectTimeout: 5000, multipleStatements: true });
+      try {
+        const [rows] = await conexion.query(queryDef.mysql.sql, queryDef.mysql.params || []);
+        return Array.isArray(rows) ? rows : [rows];
+      } finally {
+        await conexion.end();
+      }
     }
 
     case "sqlserver": {
-      if (!sqlServerConnected) {
-        await sqlServerPool.connect();
-        sqlServerConnected = true;
+      const pool = await sql.connect(cfg);
+      try {
+        const res = await pool.request().query(queryDef.sqlserver.sql);
+        return res.recordset || [{ filas_afectadas: res.rowsAffected[0] ?? 0 }];
+      } finally {
+        await pool.close();
       }
-      const request = sqlServerPool.request();
-      if (queryDef.sqlserver.params) {
-        for (const p of queryDef.sqlserver.params) {
-          request.input(p.name, p.type, p.value);
-        }
-      }
-      const result = await request.query(queryDef.sqlserver.sql);
-      return result.recordset || result.rowsAffected;
     }
 
     case "oracle": {
-      let conn;
+      const conexion = await oracledb.getConnection({
+        user: cfg.user,
+        password: cfg.password,
+        connectString: `${cfg.host}:${cfg.port}/${cfg.service}`,
+      });
       try {
-        conn = await oracledb.getConnection({
-          user: process.env.ORACLE_USER || "system",
-          password: process.env.ORACLE_PASSWORD || "oracle",
-          connectString: process.env.ORACLE_CONNECT_STRING || "localhost:1521/FREEPDB1"
-        });
-        const result = await conn.execute(queryDef.oracle.sql, queryDef.oracle.binds || {}, { autoCommit: true });
-        return result.rows || result.outBinds;
+        const res = await conexion.execute(queryDef.oracle.sql, queryDef.oracle.binds || {}, { autoCommit: true });
+        return res.rows || [{ filas_afectadas: res.rowsAffected ?? 0 }];
       } finally {
-        if (conn) {
-          await conn.close();
-        }
+        await conexion.close();
       }
     }
 
     default:
-      throw new Error(`Gestor de base de datos no reconocido: ${gestor}`);
+      throw new Error(`Gestor no soportado: ${gestor}`);
   }
 }

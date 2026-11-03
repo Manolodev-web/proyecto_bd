@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import "./App.css";
 
-import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { SqlEditor } from "./components/SqlEditor";
 import { ResultsTable } from "./components/ResultsTable";
@@ -19,7 +18,11 @@ const LOCAL_STORAGE_HISTORY_KEY = "recoleccion_sql_historial";
 const LOCAL_STORAGE_FAVS_KEY = "recoleccion_sql_favoritas";
 const LOCAL_STORAGE_THEME_KEY = "recoleccion_sql_tema";
 
-export default function SqlWorkbench() {
+interface SqlWorkbenchProps {
+  entorno?: "local" | "docker";
+}
+
+export default function SqlWorkbench({ entorno: entornoProp }: SqlWorkbenchProps) {
   // 1. Estado de Tema (Modo Oscuro / Claro)
   const [modoOscuro, setModoOscuro] = useState<boolean>(() => {
     const saved = localStorage.getItem(LOCAL_STORAGE_THEME_KEY);
@@ -30,18 +33,33 @@ export default function SqlWorkbench() {
     localStorage.setItem(LOCAL_STORAGE_THEME_KEY, modoOscuro ? "dark" : "light");
   }, [modoOscuro]);
 
-  // 2. Motor de Base de Datos Activo
+  // 2. Entorno Activo (Local vs Docker)
+  const [entorno, setEntorno] = useState<"local" | "docker">(() => {
+    if (entornoProp) return entornoProp;
+    const guardado = localStorage.getItem("recoleccion_entorno");
+    return (guardado as "local" | "docker") || "docker";
+  });
+
+  const cambiarEntorno = () => {
+    const nuevo = entorno === "local" ? "docker" : "local";
+    setEntorno(nuevo);
+    localStorage.setItem("recoleccion_entorno", nuevo);
+    mostrarToast(
+      `Cambiado a ${nuevo === "docker" ? "Contenedores Docker" : "Bases de Datos Locales"}`,
+      "info"
+    );
+  };
+
+  // 3. Motor de Base de Datos Activo
   const [gestor, setGestor] = useState<string>("postgres");
 
-  // 3. Comprobación de salud del Backend
+  // 4. Comprobación de salud del Backend
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
-  const [comprobandoBackend, setComprobandoBackend] = useState<boolean>(false);
 
-  // 4. Bandera de auto-resolución de nombres de tablas a MAYÚSCULAS
-  // Activa por defecto para que las consultas en minúsculas funcionen siempre en MySQL
+  // 5. Bandera de auto-resolución de nombres de tablas a MAYÚSCULAS para MySQL
   const [autoResolverTablas, setAutoResolverTablas] = useState<boolean>(true);
 
-  // 5. Pestañas de Consultas (Multi-tabs)
+  // 6. Pestañas de Consultas (Multi-tabs)
   const [tabs, setTabs] = useState<TabConsulta[]>([
     {
       id: "tab-1",
@@ -52,12 +70,12 @@ export default function SqlWorkbench() {
   ]);
   const [tabActivaId, setTabActivaId] = useState<string>("tab-1");
 
-  // 6. Estado de Ejecución y Resultados
+  // 7. Estado de Ejecución y Resultados
   const [cargando, setCargando] = useState<boolean>(false);
   const [resultado, setResultado] = useState<ResultadoConsulta | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 7. Notificaciones Toast Flotantes
+  // 8. Notificaciones Toast Flotantes
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const mostrarToast = useCallback(
@@ -75,7 +93,7 @@ export default function SqlWorkbench() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // 8. Historial y Consultas Favoritas en localStorage
+  // 9. Historial y Consultas Favoritas en localStorage
   const [historial, setHistorial] = useState<HistorialItem[]>(() => {
     try {
       const raw = localStorage.getItem(LOCAL_STORAGE_HISTORY_KEY);
@@ -125,39 +143,6 @@ export default function SqlWorkbench() {
       })
     );
   };
-
-  // 9. Verificar estado del servidor Backend
-  const verificarBackend = useCallback(async (silencioso: boolean = false) => {
-    setComprobandoBackend(true);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
-
-    try {
-      const res = await fetch("http://localhost:4000/api/health", {
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        setBackendOnline(true);
-        if (!silencioso) {
-          mostrarToast("Servidor Backend conectado en http://localhost:4000", "exito");
-        }
-      } else {
-        setBackendOnline(false);
-      }
-    } catch {
-      clearTimeout(timeoutId);
-      setBackendOnline(false);
-      if (!silencioso) {
-        mostrarToast(
-          "No se pudo conectar con el Backend en localhost:4000. Asegúrate de ejecutar npm run dev en el backend",
-          "advertencia"
-        );
-      }
-    } finally {
-      setComprobandoBackend(false);
-    }
-  }, [mostrarToast]);
 
   // Comprobar salud al iniciar la app
   useEffect(() => {
@@ -210,21 +195,18 @@ export default function SqlWorkbench() {
     }
   };
 
-  // 11. Ejecución de la Consulta SQL con resolución inteligente de mayúsculas
+  // 11. Ejecución de la Consulta SQL
   const ejecutarSQL = async () => {
     let queryOriginal = sqlQuery.trim();
     if (!queryOriginal) {
-      // Si el editor está en blanco con el texto de muestra, ejecuta la consulta de muestra por defecto
       queryOriginal = "SELECT * FROM EMPLEADO;";
     }
 
     setCargando(true);
     setError(null);
 
-    // Si la opción de auto-resolución está activa, convertimos nombres de tablas a MAYÚSCULAS
-    // para que MySQL en Docker Linux no falle por case-sensitivity
     let sqlParaEnviar = queryOriginal;
-    if (autoResolverTablas) {
+    if (autoResolverTablas && gestor === "mysql") {
       const sqlResuelto = resolveTableNamesCase(queryOriginal);
       if (sqlResuelto !== queryOriginal) {
         sqlParaEnviar = sqlResuelto;
@@ -234,8 +216,16 @@ export default function SqlWorkbench() {
     try {
       const res = await fetch("http://localhost:4000/api/query", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ gestor, sql: sqlParaEnviar }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-engine": gestor,
+          "x-database-env": entorno,
+        },
+        body: JSON.stringify({
+          gestor,
+          sql: sqlParaEnviar,
+          entorno,
+        }),
       });
 
       const data = await res.json();
@@ -243,7 +233,7 @@ export default function SqlWorkbench() {
       if (!data.exito) {
         setError(data.error || "Ocurrió un error al ejecutar la sentencia.");
         setResultado(null);
-        mostrarToast(`Error devuelto por ${gestor.toUpperCase()}`, "error");
+        mostrarToast(`Error en ${gestor.toUpperCase()}: ${data.error}`, "error");
       } else {
         setResultado(data);
         mostrarToast(
@@ -251,7 +241,6 @@ export default function SqlWorkbench() {
           "exito"
         );
 
-        // Registrar en el historial
         const nuevoHistorialItem: HistorialItem = {
           id: `hist_${Date.now()}`,
           gestor,
@@ -320,30 +309,99 @@ export default function SqlWorkbench() {
   };
 
   return (
-    <div className={`app-layout ${modoOscuro ? "" : "modo-claro"}`}>
-      {/* 1. Cabecera Institucional */}
-      <Header
-        gestor={gestor}
-        setGestor={setGestor}
-        modoOscuro={modoOscuro}
-        setModoOscuro={setModoOscuro}
-        backendOnline={backendOnline}
-        comprobandoBackend={comprobandoBackend}
-        verificarBackend={verificarBackend}
-      />
+    <div className={`app-layout ${modoOscuro ? "" : "modo-claro"}`} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {/* Barra de Controles Superior del Workbench */}
+      <div style={{
+        padding: "8px 16px",
+        background: "var(--color-bg-secondary, #1E3E62)",
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        fontSize: "12px"
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          {/* Selector de Gestor */}
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", fontSize: "11px" }}>Motor:</span>
+            <select
+              value={gestor}
+              onChange={(e) => setGestor(e.target.value)}
+              style={{
+                padding: "4px 8px",
+                borderRadius: "6px",
+                background: "rgba(0,0,0,0.3)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.2)",
+                fontSize: "12px",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+            >
+              <option value="postgres">🐘 PostgreSQL</option>
+              <option value="mysql">🐬 MySQL 8.0</option>
+              <option value="sqlserver">🪟 SQL Server</option>
+              <option value="oracle">🔴 Oracle XE</option>
+            </select>
+          </div>
 
-      {/* 2. Cuerpo Principal (Sidebar + Editor + Resultados) */}
-      <div className="app-body">
-        {/* Explorador de Esquema */}
+          {/* BOTÓN TOGGLE LOCAL / DOCKER */}
+          <button
+            onClick={cambiarEntorno}
+            style={{
+              padding: "4px 12px",
+              borderRadius: "14px",
+              background: entorno === "docker" ? "#0284c7" : "#059669",
+              color: "#fff",
+              border: "none",
+              fontWeight: 700,
+              fontSize: "11px",
+              cursor: "pointer",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.2)"
+            }}
+            title="Alternar entre conexión Local y Docker"
+          >
+            {entorno === "docker" ? "🐳 Docker (5433/3307)" : "💻 Local (5432/3306)"}
+          </button>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{
+            display: "inline-block",
+            width: "8px",
+            height: "8px",
+            borderRadius: "50%",
+            background: backendOnline ? "#10b981" : "#ef4444"
+          }} />
+          <span style={{ color: "#94a3b8", fontSize: "11px" }}>
+            {backendOnline ? "API Conectada" : "Sin Conexión"}
+          </span>
+          <button
+            onClick={() => setModoOscuro(!modoOscuro)}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(255,255,255,0.2)",
+              color: "#fff",
+              borderRadius: "6px",
+              padding: "2px 8px",
+              fontSize: "11px",
+              cursor: "pointer"
+            }}
+          >
+            {modoOscuro ? "☀️ Claro" : "🌙 Oscuro"}
+          </button>
+        </div>
+      </div>
+
+      {/* Cuerpo Principal (Sidebar + Editor + Resultados) */}
+      <div className="app-body" style={{ flex: 1, overflow: "hidden" }}>
         <Sidebar
           onInsertarEnEditor={insertarEnEditor}
           onCargarConsulta={cargarConsulta}
           gestor={gestor}
         />
 
-        {/* Zona de Trabajo Central */}
         <main className="app-main-workspace">
-          {/* Editor SQL con Tabs y Formateador */}
           <SqlEditor
             tabs={tabs}
             tabActivaId={tabActivaId}
@@ -360,7 +418,6 @@ export default function SqlWorkbench() {
             onMostrarToast={mostrarToast}
           />
 
-          {/* Panel Inferior de Resultados, Historial y Favoritas */}
           <ResultsTable
             resultado={resultado}
             error={error}
@@ -376,7 +433,6 @@ export default function SqlWorkbench() {
         </main>
       </div>
 
-      {/* Notificaciones Toast Flotantes */}
       <Toast toasts={toasts} onCerrar={cerrarToast} />
     </div>
   );

@@ -1,269 +1,723 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 interface Props {
   gestor: string;
 }
 
+interface VehiculoKanban {
+  id_vehiculo: number;
+  placa: string;
+  tipo: string;
+  modelo: string;
+  capacidad: number;
+  estado: "DISPONIBLE" | "EN RUTA" | "EN TALLER" | string;
+}
+
 export default function FlotaModule({ gestor }: Props) {
+  // 1. Estado para el Tablero Kanban Operativo
+  const [vehiculosFlota, setVehiculosFlota] = useState<VehiculoKanban[]>([]);
+  const [cargandoFlota, setCargandoFlota] = useState(false);
+
+  // 2. Estados para Baja y Taller (sp_baja_vehiculo_y_contingencia)
   const [idVehiculo, setIdVehiculo] = useState("");
-  const [fechaAuditoria, setFechaAuditoria] = useState("");
+  const [idCentroDestino, setIdCentroDestino] = useState("1");
+  const [motivoBaja, setMotivoBaja] = useState("Falla en sistema hidráulico");
+  const [kilometraje, setKilometraje] = useState("45000");
+
+  // 3. Estados para Auditoría de Carga (cr_auditoria_carga_trabajo_vehiculo)
+  const [fechaInicio, setFechaInicio] = useState(() => {
+    const hoy = new Date();
+    return `${hoy.getFullYear()}-01-01`;
+  });
+  const [fechaFin, setFechaFin] = useState(() => {
+    const hoy = new Date();
+    const mm = String(hoy.getMonth() + 1).padStart(2, "0");
+    const dd = String(hoy.getDate()).padStart(2, "0");
+    return `${hoy.getFullYear()}-${mm}-${dd}`;
+  });
+
+  // 4. Estados para Disponibilidad Rápida (fn_verificar_disponibilidad_vehiculo)
+  const [idVehiculoVerif, setIdVehiculoVerif] = useState("");
+  const [fechaVerif, setFechaVerif] = useState(() => {
+    const hoy = new Date();
+    const mm = String(hoy.getMonth() + 1).padStart(2, "0");
+    const dd = String(hoy.getDate()).padStart(2, "0");
+    return `${hoy.getFullYear()}-${mm}-${dd}`;
+  });
+  const [turnoVerif, setTurnoVerif] = useState("MAÑANA");
+  const [estadoDisponibilidad, setEstadoDisponibilidad] = useState<string | null>(null);
+
+  // Estados de feedback
+  const [resultadoBaja, setResultadoBaja] = useState<string | null>(null);
+  const [errorBaja, setErrorBaja] = useState<string | null>(null);
+  const [datosAuditoria, setDatosAuditoria] = useState<any[] | null>(null);
+  const [cargandoAccion, setCargandoAccion] = useState(false);
 
   // =========================================================================
+  // CARGAR ESTADO EN VIVO DE LA FLOTA PARA EL TABLERO KANBAN
+  // =========================================================================
+  const cargarTableroFlota = async () => {
+    setCargandoFlota(true);
+    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
 
-  const [resultadoBaja, setResultadoBaja] = useState<any>(null);
-  const [datosAuditoria, setDatosAuditoria] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+    try {
+      const res = await fetch("http://localhost:4000/api/query", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
+        body: JSON.stringify({
+          gestor,
+          entorno,
+          sql: "SELECT id_vehiculo, placa, tipo, modelo, capacidad, UPPER(estado) as estado FROM VEHICULO ORDER BY id_vehiculo ASC;",
+        }),
+      });
 
-  // 1. Función para declarar baja y enviar a taller (Conexión con SP)
+      const data = await res.json();
+      if (data.exito && Array.isArray(data.datos)) {
+        setVehiculosFlota(data.datos);
+      }
+    } catch (err) {
+      console.error("Error al cargar tablero automotor:", err);
+    } finally {
+      setCargandoFlota(false);
+    }
+  };
+
+  useEffect(() => {
+    cargarTableroFlota();
+  }, [gestor]);
+
+  // =========================================================================
+  // 1. DECLARAR BAJA Y ACTIVAR CONTINGENCIA
+  // =========================================================================
   const handleDeclararBajaYTaller = async () => {
     if (!idVehiculo) {
-      alert("Por favor ingrese un ID de vehículo.");
+      alert("Por favor selecciona o ingresa un ID de vehículo.");
       return;
     }
 
-    setLoading(true);
+    setCargandoAccion(true);
+    setResultadoBaja(null);
+    setErrorBaja(null);
+
+    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
+
     try {
       const response = await fetch("http://localhost:4000/api/flota/baja-contingencia", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
         body: JSON.stringify({
-          gestor: gestor,
+          gestor,
+          entorno,
           id_vehiculo: Number(idVehiculo),
-          id_centro_destino: 1,
-          motivo_mantenimiento: "Falla mecánica",
-          kilometraje_actual: 45000
-        })
+          id_centro_destino: Number(idCentroDestino) || 1,
+          motivo_mantenimiento: motivoBaja || "Falla mecánica",
+          kilometraje_actual: Number(kilometraje) || 0,
+        }),
       });
+
       const data = await response.json();
-      setResultadoBaja(data);
-    } catch (error) {
-      console.error("Error al declarar baja:", error);
-      alert("Error de conexión con el servidor backend.");
+      if (!response.ok || !data.exito) {
+        throw new Error(data.error || "Error al procesar la contingencia.");
+      }
+
+      setResultadoBaja(data.mensaje || "Vehículo enviado a taller exitosamente.");
+      // Refrescar el tablero Kanban inmediatamente para ver el cambio de columna
+      cargarTableroFlota();
+    } catch (error: any) {
+      setErrorBaja(error.message || "Error al conectar con el servidor.");
     } finally {
-      setLoading(false);
+      setCargandoAccion(false);
     }
   };
 
-  // 2. Función para auditar el kilometraje (Conexión con Cursor)
+  // =========================================================================
+  // 2. AUDITAR KILOMETRAJE CON CURSOR
+  // =========================================================================
   const handleAuditarKilometraje = async () => {
-    if (!fechaAuditoria) {
-      alert("Por favor seleccione una fecha para la auditoría.");
-      return;
-    }
+    setCargandoAccion(true);
+    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
 
-    setLoading(true);
     try {
       const response = await fetch("http://localhost:4000/api/flota/auditoria-carga", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
         body: JSON.stringify({
-          gestor: gestor,
-          fecha_inicio: fechaAuditoria,
-          fecha_fin: fechaAuditoria
-        })
+          gestor,
+          entorno,
+          fecha_inicio: fechaInicio,
+          fecha_fin: fechaFin,
+        }),
       });
+
       const data = await response.json();
+      if (!response.ok || !data.exito) {
+        throw new Error(data.error || "Error al auditar kilometraje.");
+      }
+
       setDatosAuditoria(data.datos || []);
-    } catch (error) {
-      console.error("Error al auditar:", error);
-      alert("Error de conexión con el servidor backend.");
+    } catch (error: any) {
+      alert(`Error en auditoría: ${error.message}`);
     } finally {
-      setLoading(false);
+      setCargandoAccion(false);
     }
   };
-  
-  const [turno, setTurno] = useState("Mañana");
-  const [estadoDisponibilidad, setEstadoDisponibilidad] = useState<string | null>(null);
 
-  // 3. Función para verificar disponibilidad (Conexión con fn_verificar_disponibilidad_vehiculo)
+  // =========================================================================
+  // 3. VERIFICAR DISPONIBILIDAD (BOOLEAN)
+  // =========================================================================
   const handleVerificarDisponibilidad = async () => {
-    if (!idVehiculo || !fechaAuditoria) {
-      alert("Por favor ingrese un ID de vehículo y seleccione una fecha.");
+    if (!idVehiculoVerif) {
+      alert("Ingresa un ID de vehículo.");
       return;
     }
 
-    setLoading(true);
+    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
+
     try {
       const response = await fetch("http://localhost:4000/api/flota/verificar-disponibilidad", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
         body: JSON.stringify({
-          gestor: gestor,
-          id_vehiculo: Number(idVehiculo),
-          fecha: fechaAuditoria,
-          turno: turno
-        })
+          gestor,
+          entorno,
+          id_vehiculo: Number(idVehiculoVerif),
+          fecha: fechaVerif,
+          turno: turnoVerif,
+        }),
       });
+
       const data = await response.json();
-      
-      if (data.exito) {
-        setEstadoDisponibilidad(data.disponible ? "✅ Vehículo Disponible" : "❌ Vehículo Ocupado / No Disponible");
+      if (data.disponible) {
+        setEstadoDisponibilidad("DISPONIBLE: Unidad libre y apta para operar.");
       } else {
-        setEstadoDisponibilidad("⚠️ Error al verificar");
+        setEstadoDisponibilidad("NO DISPONIBLE: Unidad ocupada en ruta o en mantenimiento.");
       }
-    } catch (error) {
-      console.error("Error al verificar disponibilidad:", error);
-    } finally {
-      setLoading(false);
+    } catch (error: any) {
+      setEstadoDisponibilidad(`Error al verificar: ${error.message}`);
     }
   };
-  // =========================================================================
+
+  // Filtrado de vehículos por columna del Kanban
+  const disponibles = vehiculosFlota.filter((v) => v.estado === "DISPONIBLE");
+  const enRuta = vehiculosFlota.filter((v) => v.estado === "EN RUTA");
+  const enTaller = vehiculosFlota.filter((v) => v.estado === "EN TALLER" || v.estado === "MANTENIMIENTO");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-      {/* Tarjeta Superior de Filtro */}
-      <div style={{
-        background: "var(--color-bg-secondary, #ffffff)",
-        padding: "20px 24px",
-        borderRadius: "12px",
-        border: "1px solid var(--color-borde, #e2e8f0)",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
-      }}>
-        <h3 style={{ margin: "0 0 6px 0", fontSize: "17px", fontWeight: 700, color: "var(--color-texto, #0F2C59)" }}>
-          🚛 Módulo 3: Control Operativo de Flota, Talleres y Contingencias
-        </h3>
-        <p style={{ margin: 0, fontSize: "12px", color: "var(--color-texto-muted, #64748b)" }}>
-          Motor activo: <strong style={{ textTransform: "uppercase", color: "#2563eb" }}>{gestor}</strong> |
-          Objetos de BD: <code>sp_baja_vehiculo_y_contingencia</code>, <code>fn_verificar_disponibilidad_vehiculo</code>, <code>cr_auditoria_carga_trabajo_vehiculo</code>, <code>tg_auditoria_estado_vehiculo</code>[cite: 5, 6, 7, 8]
-        </p>
-
-        {/* Acciones de Flota */}
-        <div style={{ display: "flex", gap: "12px", marginTop: "16px", flexWrap: "wrap", alignItems: "center" }}>
-          <input
-            type="number"
-            placeholder="ID Vehículo / Camión..."
-            value={idVehiculo}
-            onChange={(e) => setIdVehiculo(e.target.value)}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "8px",
-              border: "1px solid var(--color-borde, #cbd5e1)",
-              fontSize: "13px",
-              width: "190px",
-              background: "var(--color-bg-primary, #ffffff)",
-              color: "var(--color-texto, #1e293b)"
-            }}
-          />
-          <input
-            type="date"
-            value={fechaAuditoria}
-            onChange={(e) => setFechaAuditoria(e.target.value)}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "8px",
-              border: "1px solid var(--color-borde, #cbd5e1)",
-              fontSize: "13px",
-              background: "var(--color-bg-primary, #ffffff)",
-              color: "var(--color-texto, #1e293b)"
-            }}
-          />
-          <button
-            onClick={handleDeclararBajaYTaller}
-            disabled={loading}
-            style={{
-              padding: "8px 18px",
-              borderRadius: "8px",
-              background: "#dc2626",
-              color: "#ffffff",
-              border: "none",
-              fontSize: "13px",
-              fontWeight: 600,
-              cursor: "pointer",
-              boxShadow: "0 2px 4px rgba(220,38,38,0.2)"
-            }}
-          >
-            {loading ? "Procesando..." : "🚨 Declarar Baja / Enviar a Taller"}
-          </button>
-          <button
-            onClick={handleAuditarKilometraje}
-            disabled={loading}
-            style={{
-              padding: "8px 18px",
-              borderRadius: "8px",
-              background: "#2563eb",
-              color: "#ffffff",
-              border: "none",
-              fontSize: "13px",
-              fontWeight: 600,
-              cursor: "pointer"
-            }}
-          >
-            {loading ? "Auditando..." : "📈 Auditar Kilometraje (Cursor)"}
-          </button>
+      {/* CABECERA */}
+      <div
+        style={{
+          background: "var(--color-bg-secondary, #ffffff)",
+          padding: "16px 20px",
+          borderRadius: "12px",
+          border: "1px solid var(--color-borde, #e2e8f0)",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "10px",
+        }}
+      >
+        <div>
+          <h3 style={{ margin: "0 0 4px 0", fontSize: "17px", fontWeight: 700, color: "var(--color-texto, #0F2C59)" }}>
+            🚛 Módulo 3: Tablero Operativo Automotor y Contingencias
+          </h3>
+          <p style={{ margin: 0, fontSize: "12px", color: "var(--color-texto-muted, #64748b)" }}>
+            Motor: <strong style={{ textTransform: "uppercase", color: "#2563eb" }}>{gestor}</strong> | Objetos:{" "}
+            <code>sp_baja_vehiculo_y_contingencia</code>, <code>cr_auditoria_carga_trabajo_vehiculo</code>,{" "}
+            <code>tg_auditoria_estado_vehiculo</code>
+          </p>
         </div>
-
-        {/* Alerta de Resultado de SP */}
-        {resultadoBaja && (
-          <div style={{ marginTop: "12px", padding: "8px 12px", background: "#fef2f2", color: "#991b1b", borderRadius: "6px", fontSize: "12px" }}>
-            <strong>Respuesta:</strong> {resultadoBaja.mensaje || resultadoBaja.error}
-          </div>
-        )}
+        <button
+          onClick={cargarTableroFlota}
+          disabled={cargandoFlota}
+          style={{
+            padding: "6px 14px",
+            background: "#2563eb",
+            color: "#fff",
+            border: "none",
+            borderRadius: "6px",
+            fontSize: "12px",
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          {cargandoFlota ? "Actualizando..." : "🔄 Refrescar Tablero"}
+        </button>
       </div>
 
-      {/* Tablero Kanban y Resultados de Flota */}
-      <div style={{
-        background: "var(--color-bg-secondary, #ffffff)",
-        padding: "24px",
-        borderRadius: "12px",
-        border: "1px solid var(--color-borde, #e2e8f0)",
-        minHeight: "420px",
-        display: "flex",
-        flexDirection: "column",
-        gap: "20px"
-      }}>
-        <h4 style={{ margin: 0, fontSize: "16px", fontWeight: 700, color: "var(--color-texto, #0F2C59)" }}>
-          📋 Tablero Operativo del Parque Automotor
-        </h4>
-
-        {/* Columnas Kanban: Disponibles, En Ruta, En Taller */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "16px" }}>
-          
-          {/* Columna 1: Disponibles */}
-          <div style={{ background: "#f8fafc", padding: "16px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-            <h5 style={{ margin: "0 0 12px 0", color: "#166534", fontSize: "14px" }}>🟢 Disponibles</h5>
-            <div style={{ fontSize: "12px", color: "#64748b" }}>Unidades listas para asignación de ruta.</div>
+      {/* ===================================================================== */}
+      {/* TABLERO KANBAN DE FLOTA (DISPONIBLES | EN RUTA | EN TALLER)           */}
+      {/* ===================================================================== */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "16px" }}>
+        {/* COLUMNA 1: DISPONIBLES */}
+        <div
+          style={{
+            background: "var(--color-bg-secondary, #ffffff)",
+            borderRadius: "10px",
+            border: "1px solid #bbf7d0",
+            padding: "14px",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <span style={{ fontWeight: 700, fontSize: "13px", color: "#166534" }}>🟢 DISPONIBLES</span>
+            <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: "10px", fontSize: "11px", fontWeight: 700 }}>
+              {disponibles.length}
+            </span>
           </div>
 
-          {/* Columna 2: En Ruta */}
-          <div style={{ background: "#f8fafc", padding: "16px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-            <h5 style={{ margin: "0 0 12px 0", color: "#2563eb", fontSize: "14px" }}>🚚 En Ruta</h5>
-            <div style={{ fontSize: "12px", color: "#64748b" }}>Unidades operando en turnos activos.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "240px", overflowY: "auto" }}>
+            {disponibles.length === 0 ? (
+              <div style={{ fontSize: "11px", color: "#94a3b8", textAlign: "center", padding: "16px" }}>
+                Sin unidades libres
+              </div>
+            ) : (
+              disponibles.map((v) => (
+                <div
+                  key={v.id_vehiculo}
+                  onClick={() => {
+                    setIdVehiculo(String(v.id_vehiculo));
+                    setIdVehiculoVerif(String(v.id_vehiculo));
+                  }}
+                  style={{
+                    background: "#f0fdf4",
+                    border: "1px solid #dcfce7",
+                    borderRadius: "6px",
+                    padding: "8px 10px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    transition: "transform 0.1s ease",
+                  }}
+                  title="Click para cargar en el formulario de baja o consulta"
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, color: "#15803d" }}>
+                    <span>#{v.id_vehiculo} - {v.placa}</span>
+                    <span>{v.capacidad} Tn</span>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#4b5563", marginTop: "2px" }}>
+                    {v.tipo} ({v.modelo || "Volvo"})
+                  </div>
+                </div>
+              ))
+            )}
           </div>
-
-          {/* Columna 3: En Taller */}
-          <div style={{ background: "#f8fafc", padding: "16px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-            <h5 style={{ margin: "0 0 12px 0", color: "#dc2626", fontSize: "14px" }}>🔧 En Taller / Contingencia</h5>
-            <div style={{ fontSize: "12px", color: "#64748b" }}>Unidades en mantenimiento o con rutas reasignadas.</div>
-          </div>
-
         </div>
 
-        {/* Sección de Resultados del Cursor de Auditoría */}
-        {datosAuditoria.length > 0 && (
-          <div style={{ width: "100%", overflowX: "auto", marginTop: "10px" }}>
-            <h5 style={{ marginBottom: "10px", color: "#0F2C59" }}>Resultados de Auditoría de Carga (Cursor)[cite: 7]</h5>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+        {/* COLUMNA 2: EN RUTA */}
+        <div
+          style={{
+            background: "var(--color-bg-secondary, #ffffff)",
+            borderRadius: "10px",
+            border: "1px solid #bfdbfe",
+            padding: "14px",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <span style={{ fontWeight: 700, fontSize: "13px", color: "#1e40af" }}>🔵 EN RUTA</span>
+            <span style={{ background: "#dbeafe", color: "#1e40af", padding: "2px 8px", borderRadius: "10px", fontSize: "11px", fontWeight: 700 }}>
+              {enRuta.length}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "240px", overflowY: "auto" }}>
+            {enRuta.length === 0 ? (
+              <div style={{ fontSize: "11px", color: "#94a3b8", textAlign: "center", padding: "16px" }}>
+                Sin camiones en ruta
+              </div>
+            ) : (
+              enRuta.map((v) => (
+                <div
+                  key={v.id_vehiculo}
+                  onClick={() => {
+                    setIdVehiculo(String(v.id_vehiculo));
+                    setIdVehiculoVerif(String(v.id_vehiculo));
+                  }}
+                  style={{
+                    background: "#eff6ff",
+                    border: "1px solid #dbeafe",
+                    borderRadius: "6px",
+                    padding: "8px 10px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                  }}
+                  title="Click para seleccionar"
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, color: "#1e40af" }}>
+                    <span>#{v.id_vehiculo} - {v.placa}</span>
+                    <span>{v.capacidad} Tn</span>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#4b5563", marginTop: "2px" }}>
+                    {v.tipo} ({v.modelo || "Scania"})
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* COLUMNA 3: EN TALLER / BAJA */}
+        <div
+          style={{
+            background: "var(--color-bg-secondary, #ffffff)",
+            borderRadius: "10px",
+            border: "1px solid #fecaca",
+            padding: "14px",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <span style={{ fontWeight: 700, fontSize: "13px", color: "#991b1b" }}>🔴 EN TALLER</span>
+            <span style={{ background: "#fee2e2", color: "#991b1b", padding: "2px 8px", borderRadius: "10px", fontSize: "11px", fontWeight: 700 }}>
+              {enTaller.length}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "240px", overflowY: "auto" }}>
+            {enTaller.length === 0 ? (
+              <div style={{ fontSize: "11px", color: "#94a3b8", textAlign: "center", padding: "16px" }}>
+                Sin unidades averiadas
+              </div>
+            ) : (
+              enTaller.map((v) => (
+                <div
+                  key={v.id_vehiculo}
+                  onClick={() => {
+                    setIdVehiculo(String(v.id_vehiculo));
+                    setIdVehiculoVerif(String(v.id_vehiculo));
+                  }}
+                  style={{
+                    background: "#fef2f2",
+                    border: "1px solid #fee2e2",
+                    borderRadius: "6px",
+                    padding: "8px 10px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                  }}
+                  title="Click para seleccionar"
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, color: "#991b1b" }}>
+                    <span>#{v.id_vehiculo} - {v.placa}</span>
+                    <span>{v.capacidad} Tn</span>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#4b5563", marginTop: "2px" }}>
+                    Mantenimiento / Falla
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ACCIONES Y FORMULARIOS */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+        {/* PANEL: BAJA Y CONTINGENCIA */}
+        <div
+          style={{
+            background: "var(--color-bg-secondary, #ffffff)",
+            padding: "20px",
+            borderRadius: "12px",
+            border: "1px solid var(--color-borde, #e2e8f0)",
+          }}
+        >
+          <h4 style={{ margin: "0 0 14px 0", fontSize: "14px", fontWeight: 700, color: "#b91c1c" }}>
+            🚨 Enviar a Taller y Relevar Rutas (Algoritmo Greedy)
+          </h4>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                ID Vehículo (Haz clic en una tarjeta de arriba) *
+              </label>
+              <input
+                type="number"
+                placeholder="Ej. 1"
+                value={idVehiculo}
+                onChange={(e) => setIdVehiculo(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                ID Centro Taller de Destino
+              </label>
+              <input
+                type="number"
+                placeholder="Ej. 1"
+                value={idCentroDestino}
+                onChange={(e) => setIdCentroDestino(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                Diagnóstico Técnico
+              </label>
+              <input
+                type="text"
+                placeholder="Ej. Falla en sistema de compactación"
+                value={motivoBaja}
+                onChange={(e) => setMotivoBaja(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                Lectura Odómetro (km)
+              </label>
+              <input
+                type="number"
+                placeholder="Ej. 45000"
+                value={kilometraje}
+                onChange={(e) => setKilometraje(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <button
+              onClick={handleDeclararBajaYTaller}
+              disabled={cargandoAccion}
+              style={{
+                marginTop: "10px",
+                padding: "10px",
+                borderRadius: "6px",
+                background: "#dc2626",
+                color: "#ffffff",
+                border: "none",
+                fontWeight: 600,
+                fontSize: "13px",
+                cursor: "pointer",
+              }}
+            >
+              {cargandoAccion ? "Ejecutando procedimiento..." : "🚨 Enviar a Taller y Ejecutar Relevo"}
+            </button>
+
+            {resultadoBaja && (
+              <div style={{ marginTop: "10px", padding: "10px", background: "#f0fdf4", color: "#166534", borderRadius: "6px", fontSize: "12px", border: "1px solid #bbf7d0" }}>
+                ✓ {resultadoBaja}
+              </div>
+            )}
+            {errorBaja && (
+              <div style={{ marginTop: "10px", padding: "10px", background: "#fee2e2", color: "#991b1b", borderRadius: "6px", fontSize: "12px", border: "1px solid #fecaca" }}>
+                ❌ {errorBaja}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* PANEL: CONSULTA RÁPIDA DE DISPONIBILIDAD */}
+        <div
+          style={{
+            background: "var(--color-bg-secondary, #ffffff)",
+            padding: "20px",
+            borderRadius: "12px",
+            border: "1px solid var(--color-borde, #e2e8f0)",
+          }}
+        >
+          <h4 style={{ margin: "0 0 14px 0", fontSize: "14px", fontWeight: 700, color: "#2563eb" }}>
+            🔍 Consultar Disponibilidad de Unidad (Filtro Booleano)
+          </h4>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                ID Vehículo
+              </label>
+              <input
+                type="number"
+                placeholder="Ej. 1 o 2"
+                value={idVehiculoVerif}
+                onChange={(e) => setIdVehiculoVerif(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                Fecha Operativa
+              </label>
+              <input
+                type="date"
+                value={fechaVerif}
+                onChange={(e) => setFechaVerif(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
+                Turno
+              </label>
+              <select
+                value={turnoVerif}
+                onChange={(e) => setTurnoVerif(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
+              >
+                <option value="MAÑANA">Mañana</option>
+                <option value="TARDE">Tarde</option>
+                <option value="NOCHE">Noche</option>
+              </select>
+            </div>
+
+            <button
+              onClick={handleVerificarDisponibilidad}
+              style={{
+                marginTop: "10px",
+                padding: "10px",
+                borderRadius: "6px",
+                background: "#2563eb",
+                color: "#ffffff",
+                border: "none",
+                fontWeight: 600,
+                fontSize: "13px",
+                cursor: "pointer",
+              }}
+            >
+              Comprobar Disponibilidad (Boolean)
+            </button>
+
+            {estadoDisponibilidad && (
+              <div
+                style={{
+                  marginTop: "10px",
+                  padding: "10px",
+                  background: estadoDisponibilidad.includes("DISPONIBLE: Unidad") ? "#dcfce7" : "#fee2e2",
+                  color: estadoDisponibilidad.includes("DISPONIBLE: Unidad") ? "#15803d" : "#b91c1c",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                }}
+              >
+                {estadoDisponibilidad}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* PANEL INFERIOR: AUDITORÍA DE KILOMETRAJE Y DESGASTE (CURSOR) */}
+      <div
+        style={{
+          background: "var(--color-bg-secondary, #ffffff)",
+          padding: "24px",
+          borderRadius: "12px",
+          border: "1px solid var(--color-borde, #cbd5e1)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
+          <div>
+            <h4 style={{ margin: "0 0 4px 0", fontSize: "15px", fontWeight: 700, color: "var(--color-texto, #0F2C59)" }}>
+              📊 Auditoría de Carga de Trabajo y Desgaste (Cursor cr_auditoria_carga_trabajo_vehiculo)
+            </h4>
+            <p style={{ margin: 0, fontSize: "12px", color: "var(--color-texto-muted, #64748b)" }}>
+              Recorre el parque automotor y calcula los kilómetros acumulados frente al promedio de la flota.
+            </p>
+          </div>
+
+          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            <input
+              type="date"
+              value={fechaInicio}
+              onChange={(e) => setFechaInicio(e.target.value)}
+              style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "12px" }}
+            />
+            <span style={{ fontSize: "12px", color: "#94a3b8" }}>al</span>
+            <input
+              type="date"
+              value={fechaFin}
+              onChange={(e) => setFechaFin(e.target.value)}
+              style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "12px" }}
+            />
+            <button
+              onClick={handleAuditarKilometraje}
+              disabled={cargandoAccion}
+              style={{
+                padding: "8px 16px",
+                borderRadius: "6px",
+                background: "#059669",
+                color: "#ffffff",
+                border: "none",
+                fontWeight: 600,
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              {cargandoAccion ? "Ejecutando Cursor..." : "📈 Generar Reporte con Cursor"}
+            </button>
+          </div>
+        </div>
+
+        {datosAuditoria && datosAuditoria.length > 0 ? (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "13px" }}>
               <thead>
-                <tr style={{ background: "#f1f5f9", color: "#475569" }}>
-                  <th style={{ padding: "8px", textAlign: "left" }}>ID</th>
-                  <th style={{ padding: "8px", textAlign: "left" }}>Placa</th>
-                  <th style={{ padding: "8px", textAlign: "left" }}>Estado</th>
-                  <th style={{ padding: "8px", textAlign: "left" }}>Rutas</th>
-                  <th style={{ padding: "8px", textAlign: "left" }}>Km Total</th>
+                <tr style={{ borderBottom: "2px solid #e2e8f0", color: "#64748b" }}>
+                  <th style={{ padding: "10px" }}>ID</th>
+                  <th style={{ padding: "10px" }}>Placa</th>
+                  <th style={{ padding: "10px" }}>Modelo</th>
+                  <th style={{ padding: "10px" }}>Estado</th>
+                  <th style={{ padding: "10px" }}>Rutas Asignadas</th>
+                  <th style={{ padding: "10px" }}>Km Recorridos</th>
+                  <th style={{ padding: "10px" }}>Desviación Promedio</th>
                 </tr>
               </thead>
               <tbody>
-                {datosAuditoria.map((item, idx) => (
-                  <tr key={idx} style={{ borderBottom: "1px solid #e2e8f0" }}>
-                    <td style={{ padding: "8px" }}>{item.id_vehiculo}</td>
-                    <td style={{ padding: "8px" }}>{item.placa}</td>
-                    <td style={{ padding: "8px" }}>{item.estado}</td>
-                    <td style={{ padding: "8px" }}>{item.total_rutas_asignadas}</td>
-                    <td style={{ padding: "8px" }}>{item.kilometraje_total_recorrido} km</td>
+                {datosAuditoria.map((v) => (
+                  <tr key={v.id_vehiculo} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                    <td style={{ padding: "10px", fontWeight: 600 }}>#{v.id_vehiculo}</td>
+                    <td style={{ padding: "10px" }}>{v.placa}</td>
+                    <td style={{ padding: "10px" }}>{v.modelo}</td>
+                    <td style={{ padding: "10px" }}>
+                      <span
+                        style={{
+                          padding: "3px 8px",
+                          borderRadius: "4px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          background: v.estado === "DISPONIBLE" ? "#dcfce7" : v.estado === "EN RUTA" ? "#dbeafe" : "#fee2e2",
+                          color: v.estado === "DISPONIBLE" ? "#166534" : v.estado === "EN RUTA" ? "#1e40af" : "#991b1b",
+                        }}
+                      >
+                        {v.estado}
+                      </span>
+                    </td>
+                    <td style={{ padding: "10px" }}>{v.total_rutas_asignadas}</td>
+                    <td style={{ padding: "10px", fontWeight: 600 }}>{v.kilometraje_total_recorrido} km</td>
+                    <td style={{ padding: "10px", color: Number(v.desviacion_flota_pct) > 0 ? "#b91c1c" : "#15803d", fontWeight: 700 }}>
+                      {Number(v.desviacion_flota_pct) > 0 ? `+${v.desviacion_flota_pct}%` : `${v.desviacion_flota_pct}%`}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        ) : (
+          <div style={{ padding: "30px", textAlign: "center", color: "#94a3b8", fontSize: "13px" }}>
+            Presiona el botón <strong>"📈 Generar Reporte con Cursor"</strong> para auditar la flota en el rango de fechas.
           </div>
         )}
       </div>

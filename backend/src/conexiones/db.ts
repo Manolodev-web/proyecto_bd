@@ -1,196 +1,147 @@
-﻿import dotenv from "dotenv";
+﻿// backend/src/conexiones/db.ts
+import dotenv from "dotenv";
 import { Pool as PgPool } from "pg";
 import mysql from "mysql2/promise";
 import sql from "mssql";
 import oracledb from "oracledb";
 
 dotenv.config();
-
-// Configuración opcional para Thin Mode nativo de node-oracledb
-// Compatible con Oracle 12c, 19c, 21c y 23ai Free sin Instant Client
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
 
 /**
- * Prueba la conectividad básica contra el motor solicitado
- * ejecutando una consulta de prueba sobre test_conexion o la tabla EMPLEADO.
+ * Obtiene la configuración de conexión leyendo estrictamente del .env
+ * según el gestor y el entorno (local vs docker)
  */
-export async function probarConexion(gestor: string) {
+export function obtenerConfiguracion(gestor: string, entorno: string = "local") {
+  const esDocker = entorno.toLowerCase() === "docker";
   const motor = gestor.toLowerCase();
 
   switch (motor) {
-    case "postgres": {
-      const pool = new PgPool({
+    case "postgres":
+      return {
         host: process.env.PG_HOST || "localhost",
-        port: Number(process.env.PG_PORT) || 5433,
-        user: process.env.PG_USER || "grupo4_recoleccion",
-        password: process.env.PG_PASSWORD || "grupo4",
-        database: process.env.PG_DATABASE || "bd_recoleccion",
-        connectionTimeoutMillis: 3000,
-      });
-
-      const cliente = await pool.connect();
-      const res = await cliente.query("SELECT * FROM test_conexion LIMIT 1;");
-      cliente.release();
-      await pool.end();
-
-      return {
-        gestor: "PostgreSQL",
-        estado: "Conectado exitosamente",
-        puerto: Number(process.env.PG_PORT) || 5433,
-        datos: res.rows,
+        port: Number(esDocker ? process.env.PG_PORT_DOCKER : process.env.PG_PORT_LOCAL) || (esDocker ? 5433 : 5432),
+        user: (esDocker ? process.env.PG_USER_DOCKER : process.env.PG_USER_LOCAL) || "postgres",
+        password: (esDocker ? process.env.PG_PASSWORD_DOCKER : process.env.PG_PASSWORD_LOCAL) || "postgres",
+        database: (esDocker ? process.env.PG_DATABASE_DOCKER : process.env.PG_DATABASE_LOCAL) || "recoleccion_lp",
       };
-    }
 
-    case "mysql": {
-      const conexion = await mysql.createConnection({
+    case "mysql":
+      return {
         host: process.env.MYSQL_HOST || "localhost",
-        port: Number(process.env.MYSQL_PORT) || 3307,
-        user: process.env.MYSQL_USER || "grupo4_recoleccion",
-        password: process.env.MYSQL_PASSWORD || "grupo4",
-        database: process.env.MYSQL_DATABASE || "bd_recoleccion",
-        connectTimeout: 3000,
-      });
-
-      const [rows] = await conexion.query("SELECT * FROM test_conexion LIMIT 1;");
-      await conexion.end();
-
-      return {
-        gestor: "MySQL",
-        estado: "Conectado exitosamente",
-        puerto: Number(process.env.MYSQL_PORT) || 3307,
-        datos: rows,
+        port: Number(esDocker ? process.env.MYSQL_PORT_DOCKER : process.env.MYSQL_PORT_LOCAL) || (esDocker ? 3307 : 3306),
+        user: (esDocker ? process.env.MYSQL_USER_DOCKER : process.env.MYSQL_USER_LOCAL) || "root",
+        password: (esDocker ? process.env.MYSQL_PASSWORD_DOCKER : process.env.MYSQL_PASSWORD_LOCAL) || "root",
+        database: (esDocker ? process.env.MYSQL_DATABASE_DOCKER : process.env.MYSQL_DATABASE_LOCAL) || "recoleccion_lp",
       };
-    }
 
-    case "sqlserver": {
-      const config: sql.config = {
+    case "sqlserver":
+      return {
         server: process.env.SQLSERVER_HOST || "localhost",
         port: Number(process.env.SQLSERVER_PORT) || 1433,
-        user: process.env.SQLSERVER_USER || "grupo4_recoleccion",
-        password: process.env.SQLSERVER_PASSWORD || "grupo4",
-        database: process.env.SQLSERVER_DATABASE || "bd_recoleccion",
-        options: {
-          encrypt: false,
-          trustServerCertificate: true,
-        },
-        connectionTimeout: 3000,
+        user: process.env.SQLSERVER_USER || "sa",
+        password: process.env.SQLSERVER_PASSWORD || "TuPasswordSeguro123!",
+        database: process.env.SQLSERVER_DATABASE || "recoleccion_lp",
+        options: { encrypt: false, trustServerCertificate: true },
       };
 
-      const pool = await sql.connect(config);
-      const res = await pool.request().query("SELECT TOP 1 * FROM test_conexion;");
-      await pool.close();
-
+    case "oracle":
       return {
-        gestor: "SQL Server",
-        estado: "Conectado exitosamente",
-        puerto: Number(process.env.SQLSERVER_PORT) || 1433,
-        datos: res.recordset,
+        host: process.env.ORACLE_HOST || "localhost",
+        port: Number(process.env.ORACLE_PORT) || 1521,
+        user: process.env.ORACLE_USER || "system",
+        password: process.env.ORACLE_PASSWORD || "oracle",
+        service: process.env.ORACLE_SERVICE || "FREEPDB1",
       };
-    }
-
-    case "oracle": {
-      const conexion = await oracledb.getConnection({
-        user: process.env.ORACLE_USER || "grupo4_recoleccion",
-        password: process.env.ORACLE_PASSWORD || "grupo4",
-        connectString: `${process.env.ORACLE_HOST || "localhost"}:${process.env.ORACLE_PORT || 1521}/${process.env.ORACLE_SERVICE || "FREEPDB1"}`,
-      });
-
-      const res = await conexion.execute("SELECT * FROM EMPLEADO WHERE ROWNUM <= 1");
-      await conexion.close();
-
-      return {
-        gestor: "Oracle",
-        estado: "Conectado exitosamente",
-        puerto: Number(process.env.ORACLE_PORT) || 1521,
-        datos: res.rows || [],
-      };
-    }
 
     default:
-      throw new Error(`Gestor no soportado actualmente: ${gestor}`);
+      throw new Error(`Gestor no soportado: ${gestor}`);
   }
 }
 
 /**
- * Ejecuta sentencias SQL arbitrarias (DQL, DDL, DML o bloques anónimos)
- * en el gestor seleccionado y devuelve el resultado formateado como arreglo JSON.
+ * Prueba la conexión contra el motor y entorno seleccionado
  */
-export async function ejecutarConsulta(gestor: string, sqlQuery: string) {
+export async function probarConexion(gestor: string, entorno: string = "local") {
   const motor = gestor.toLowerCase();
+  const cfg = obtenerConfiguracion(motor, entorno) as any;
 
   switch (motor) {
     case "postgres": {
-      const pool = new PgPool({
-        host: process.env.PG_HOST || "localhost",
-        port: Number(process.env.PG_PORT) || 5433,
-        user: process.env.PG_USER || "grupo4_recoleccion",
-        password: process.env.PG_PASSWORD || "grupo4",
-        database: process.env.PG_DATABASE || "bd_recoleccion",
-        connectionTimeoutMillis: 5000,
+      const pool = new PgPool({ ...cfg, connectionTimeoutMillis: 3000 });
+      const cliente = await pool.connect();
+      const res = await cliente.query("SELECT * FROM test_conexion LIMIT 1;");
+      cliente.release();
+      await pool.end();
+      return { gestor: "PostgreSQL", entorno, puerto: cfg.port, estado: "Conectado exitosamente", datos: res.rows };
+    }
+    case "mysql": {
+      const conexion = await mysql.createConnection({ ...cfg, connectTimeout: 3000 });
+      const [rows] = await conexion.query("SELECT * FROM test_conexion LIMIT 1;");
+      await conexion.end();
+      return { gestor: "MySQL", entorno, puerto: cfg.port, estado: "Conectado exitosamente", datos: rows };
+    }
+    case "sqlserver": {
+      const pool = await sql.connect(cfg);
+      const res = await pool.request().query("SELECT TOP 1 * FROM test_conexion;");
+      await pool.close();
+      return { gestor: "SQL Server", entorno, puerto: cfg.port, estado: "Conectado exitosamente", datos: res.recordset };
+    }
+    case "oracle": {
+      const conexion = await oracledb.getConnection({
+        user: cfg.user,
+        password: cfg.password,
+        connectString: `${cfg.host}:${cfg.port}/${cfg.service}`,
       });
+      const res = await conexion.execute("SELECT * FROM EMPLEADO WHERE ROWNUM <= 1");
+      await conexion.close();
+      return { gestor: "Oracle", entorno, puerto: cfg.port, estado: "Conectado exitosamente", datos: res.rows || [] };
+    }
+    default:
+      throw new Error(`Gestor no soportado: ${gestor}`);
+  }
+}
 
+/**
+ * Ejecuta consultas dinámicas adaptándose al entorno y motor solicitado
+ */
+export async function ejecutarConsulta(gestor: string, sqlQuery: string, entorno: string = "local") {
+  const motor = gestor.toLowerCase();
+  const cfg = obtenerConfiguracion(motor, entorno) as any;
+
+  switch (motor) {
+    case "postgres": {
+      const pool = new PgPool({ ...cfg, connectionTimeoutMillis: 5000 });
       const res = await pool.query(sqlQuery);
       await pool.end();
-
-      // Si la sentencia devuelve filas (ej. SELECT), devolverlas; si es DML/DDL, devolver filas afectadas
       if (Array.isArray(res)) {
-        // En caso de múltiples sentencias ejecutadas en un solo comando
-        const ultimo = res[res.length - 1];
-        return ultimo.rows || [{ mensaje: "Sentencias ejecutadas con éxito" }];
+        return res[res.length - 1].rows || [{ mensaje: "Sentencia ejecutada con éxito" }];
       }
       return res.rows || [{ filas_afectadas: res.rowCount ?? 0 }];
     }
-
     case "mysql": {
-      const conexion = await mysql.createConnection({
-        host: process.env.MYSQL_HOST || "localhost",
-        port: Number(process.env.MYSQL_PORT) || 3307,
-        user: process.env.MYSQL_USER || "grupo4_recoleccion",
-        password: process.env.MYSQL_PASSWORD || "grupo4",
-        database: process.env.MYSQL_DATABASE || "bd_recoleccion",
-        connectTimeout: 5000,
-        multipleStatements: true,
-      });
-
+      const conexion = await mysql.createConnection({ ...cfg, connectTimeout: 5000, multipleStatements: true });
       const [rows] = await conexion.query(sqlQuery);
       await conexion.end();
       return Array.isArray(rows) ? rows : [rows];
     }
-
     case "sqlserver": {
-      const config: sql.config = {
-        server: process.env.SQLSERVER_HOST || "localhost",
-        port: Number(process.env.SQLSERVER_PORT) || 1433,
-        user: process.env.SQLSERVER_USER || "grupo4_recoleccion",
-        password: process.env.SQLSERVER_PASSWORD || "grupo4",
-        database: process.env.SQLSERVER_DATABASE || "bd_recoleccion",
-        options: {
-          encrypt: false,
-          trustServerCertificate: true,
-        },
-        connectionTimeout: 5000,
-      };
-
-      const pool = await sql.connect(config);
+      const pool = await sql.connect(cfg);
       const res = await pool.request().query(sqlQuery);
       await pool.close();
       return res.recordset || [{ filas_afectadas: res.rowsAffected[0] ?? 0 }];
     }
-
     case "oracle": {
       const conexion = await oracledb.getConnection({
-        user: process.env.ORACLE_USER || "grupo4_recoleccion",
-        password: process.env.ORACLE_PASSWORD || "grupo4",
-        connectString: `${process.env.ORACLE_HOST || "localhost"}:${process.env.ORACLE_PORT || 1521}/${process.env.ORACLE_SERVICE || "FREEPDB1"}`,
+        user: cfg.user,
+        password: cfg.password,
+        connectString: `${cfg.host}:${cfg.port}/${cfg.service}`,
       });
-
       const res = await conexion.execute(sqlQuery, [], { autoCommit: true });
       await conexion.close();
-
       return res.rows || [{ filas_afectadas: res.rowsAffected ?? 0 }];
     }
-
     default:
-      throw new Error(`Gestor ${gestor} no disponible para consultas directas.`);
+      throw new Error(`Gestor ${gestor} no disponible.`);
   }
 }
