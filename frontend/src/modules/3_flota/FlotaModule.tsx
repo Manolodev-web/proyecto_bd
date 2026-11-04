@@ -18,13 +18,7 @@ export default function FlotaModule({ gestor }: Props) {
   const [vehiculosFlota, setVehiculosFlota] = useState<VehiculoKanban[]>([]);
   const [cargandoFlota, setCargandoFlota] = useState(false);
 
-  // 2. Estados para Baja y Taller (sp_baja_vehiculo_y_contingencia)
-  const [idVehiculo, setIdVehiculo] = useState("");
-  const [idCentroDestino, setIdCentroDestino] = useState("1");
-  const [motivoBaja, setMotivoBaja] = useState("Falla en sistema hidráulico");
-  const [kilometraje, setKilometraje] = useState("45000");
-
-  // 3. Estados para Auditoría de Carga (cr_auditoria_carga_trabajo_vehiculo)
+  // 2. Estados para Auditoría de Carga (cr_auditoria_carga_trabajo_vehiculo)
   const [fechaInicio, setFechaInicio] = useState(() => {
     const hoy = new Date();
     return `${hoy.getFullYear()}-01-01`;
@@ -36,7 +30,7 @@ export default function FlotaModule({ gestor }: Props) {
     return `${hoy.getFullYear()}-${mm}-${dd}`;
   });
 
-  // 4. Estados para Disponibilidad Rápida (fn_verificar_disponibilidad_vehiculo)
+  // 3. Estados para Disponibilidad Rápida (fn_verificar_disponibilidad_vehiculo)
   const [idVehiculoVerif, setIdVehiculoVerif] = useState("");
   const [fechaVerif, setFechaVerif] = useState(() => {
     const hoy = new Date();
@@ -48,8 +42,6 @@ export default function FlotaModule({ gestor }: Props) {
   const [estadoDisponibilidad, setEstadoDisponibilidad] = useState<string | null>(null);
 
   // Estados de feedback
-  const [resultadoBaja, setResultadoBaja] = useState<string | null>(null);
-  const [errorBaja, setErrorBaja] = useState<string | null>(null);
   const [datosAuditoria, setDatosAuditoria] = useState<any[] | null>(null);
   const [cargandoAccion, setCargandoAccion] = useState(false);
 
@@ -91,55 +83,7 @@ export default function FlotaModule({ gestor }: Props) {
   }, [gestor]);
 
   // =========================================================================
-  // 1. DECLARAR BAJA Y ACTIVAR CONTINGENCIA
-  // =========================================================================
-  const handleDeclararBajaYTaller = async () => {
-    if (!idVehiculo) {
-      alert("Por favor selecciona o ingresa un ID de vehículo.");
-      return;
-    }
-
-    setCargandoAccion(true);
-    setResultadoBaja(null);
-    setErrorBaja(null);
-
-    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
-
-    try {
-      const response = await fetch("http://localhost:4000/api/flota/baja-contingencia", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-database-env": entorno,
-          "x-database-engine": gestor,
-        },
-        body: JSON.stringify({
-          gestor,
-          entorno,
-          id_vehiculo: Number(idVehiculo),
-          id_centro_destino: Number(idCentroDestino) || 1,
-          motivo_mantenimiento: motivoBaja || "Falla mecánica",
-          kilometraje_actual: Number(kilometraje) || 0,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok || !data.exito) {
-        throw new Error(data.error || "Error al procesar la contingencia.");
-      }
-
-      setResultadoBaja(data.mensaje || "Vehículo enviado a taller exitosamente.");
-      // Refrescar el tablero Kanban inmediatamente para ver el cambio de columna
-      cargarTableroFlota();
-    } catch (error: any) {
-      setErrorBaja(error.message || "Error al conectar con el servidor.");
-    } finally {
-      setCargandoAccion(false);
-    }
-  };
-
-  // =========================================================================
-  // 2. AUDITAR KILOMETRAJE CON CURSOR
+  // 1. AUDITAR KILOMETRAJE CON CURSOR
   // =========================================================================
   const handleAuditarKilometraje = async () => {
     setCargandoAccion(true);
@@ -175,7 +119,7 @@ export default function FlotaModule({ gestor }: Props) {
   };
 
   // =========================================================================
-  // 3. VERIFICAR DISPONIBILIDAD (BOOLEAN)
+  // 2. VERIFICAR DISPONIBILIDAD (BOOLEAN)
   // =========================================================================
   const handleVerificarDisponibilidad = async () => {
     if (!idVehiculoVerif) {
@@ -294,7 +238,6 @@ export default function FlotaModule({ gestor }: Props) {
                 <div
                   key={v.id_vehiculo}
                   onClick={() => {
-                    setIdVehiculo(String(v.id_vehiculo));
                     setIdVehiculoVerif(String(v.id_vehiculo));
                   }}
                   style={{
@@ -306,7 +249,7 @@ export default function FlotaModule({ gestor }: Props) {
                     fontSize: "12px",
                     transition: "transform 0.1s ease",
                   }}
-                  title="Click para cargar en el formulario de baja o consulta"
+                  title="Click para cargar en el formulario de consulta"
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, color: "#15803d" }}>
                     <span>#{v.id_vehiculo} - {v.placa}</span>
@@ -349,7 +292,6 @@ export default function FlotaModule({ gestor }: Props) {
                 <div
                   key={v.id_vehiculo}
                   onClick={() => {
-                    setIdVehiculo(String(v.id_vehiculo));
                     setIdVehiculoVerif(String(v.id_vehiculo));
                   }}
                   style={{
@@ -403,7 +345,6 @@ export default function FlotaModule({ gestor }: Props) {
                 <div
                   key={v.id_vehiculo}
                   onClick={() => {
-                    setIdVehiculo(String(v.id_vehiculo));
                     setIdVehiculoVerif(String(v.id_vehiculo));
                   }}
                   style={{
@@ -430,105 +371,8 @@ export default function FlotaModule({ gestor }: Props) {
         </div>
       </div>
 
-      {/* ACCIONES Y FORMULARIOS */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-        {/* PANEL: BAJA Y CONTINGENCIA */}
-        <div
-          style={{
-            background: "var(--color-bg-secondary, #ffffff)",
-            padding: "20px",
-            borderRadius: "12px",
-            border: "1px solid var(--color-borde, #e2e8f0)",
-          }}
-        >
-          <h4 style={{ margin: "0 0 14px 0", fontSize: "14px", fontWeight: 700, color: "#b91c1c" }}>
-            🚨 Enviar a Taller y Relevar Rutas (Algoritmo Greedy)
-          </h4>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                ID Vehículo (Haz clic en una tarjeta de arriba) *
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 1"
-                value={idVehiculo}
-                onChange={(e) => setIdVehiculo(e.target.value)}
-                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                ID Centro Taller de Destino
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 1"
-                value={idCentroDestino}
-                onChange={(e) => setIdCentroDestino(e.target.value)}
-                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                Diagnóstico Técnico
-              </label>
-              <input
-                type="text"
-                placeholder="Ej. Falla en sistema de compactación"
-                value={motivoBaja}
-                onChange={(e) => setMotivoBaja(e.target.value)}
-                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                Lectura Odómetro (km)
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 45000"
-                value={kilometraje}
-                onChange={(e) => setKilometraje(e.target.value)}
-                style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", fontSize: "13px" }}
-              />
-            </div>
-
-            <button
-              onClick={handleDeclararBajaYTaller}
-              disabled={cargandoAccion}
-              style={{
-                marginTop: "10px",
-                padding: "10px",
-                borderRadius: "6px",
-                background: "#dc2626",
-                color: "#ffffff",
-                border: "none",
-                fontWeight: 600,
-                fontSize: "13px",
-                cursor: "pointer",
-              }}
-            >
-              {cargandoAccion ? "Ejecutando procedimiento..." : "🚨 Enviar a Taller y Ejecutar Relevo"}
-            </button>
-
-            {resultadoBaja && (
-              <div style={{ marginTop: "10px", padding: "10px", background: "#f0fdf4", color: "#166534", borderRadius: "6px", fontSize: "12px", border: "1px solid #bbf7d0" }}>
-                ✓ {resultadoBaja}
-              </div>
-            )}
-            {errorBaja && (
-              <div style={{ marginTop: "10px", padding: "10px", background: "#fee2e2", color: "#991b1b", borderRadius: "6px", fontSize: "12px", border: "1px solid #fecaca" }}>
-                ❌ {errorBaja}
-              </div>
-            )}
-          </div>
-        </div>
-
+      {/* ACCIONES Y FORMULARIOS (Solo Consulta de Disponibilidad) */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "20px" }}>
         {/* PANEL: CONSULTA RÁPIDA DE DISPONIBILIDAD */}
         <div
           style={{
