@@ -4,40 +4,54 @@ interface Props {
   gestor: string;
 }
 
+interface ContenedorTramo {
+  id_contenedor: number;
+  ubicacion: string;
+  capacidad: number;
+  estado: string;
+}
+
+interface TrazabilidadInfo {
+  id_ruta: number;
+  nombre_ruta: string;
+  distancia_km: number;
+  placa_vehiculo: string;
+  conductor: string;
+  total_contenedores: number;
+  capacidad_total_litros: number;
+}
+
 export default function RutasModule({ gestor }: Props) {
-  // Estados para búsqueda de ruta
-  const [idRutaBusqueda, setIdRutaBusqueda] = useState("");
-  const [ciBusqueda, setCiBusqueda] = useState("");
-  const [rutaInfo, setRutaInfo] = useState<any>(null);
-  const [cargandoBusqueda, setCargandoBusqueda] = useState(false);
+  // Filtros de búsqueda operativa
+  const [idRutaBusqueda, setIdRutaBusqueda] = useState("100");
+  const [fechaOperativa, setFechaOperativa] = useState(
+    new Date().toISOString().split("T")[0]
+  );
 
-  // Estados para despacho de operativo
-  const [idRutaDespacho, setIdRutaDespacho] = useState("");
-  const [idVehiculo, setIdVehiculo] = useState("");
-  const [ciConductor, setCiConductor] = useState("");
-  const [ayudantesTexto, setAyudantesTexto] = useState("");
-  const [turno, setTurno] = useState("MAÑANA");
-  const [cargandoDespacho, setCargandoDespacho] = useState(false);
+  // Estados de datos devueltos por la BD
+  const [trazabilidad, setTrazabilidad] = useState<TrazabilidadInfo | null>(null);
+  const [contenedores, setContenedores] = useState<ContenedorTramo[]>([]);
+  const [cargando, setCargando] = useState(false);
 
-  // Mensajes de respuesta
+  // Mensajes de retroalimentación
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [mensajeError, setMensajeError] = useState<string | null>(null);
 
-  // 1. Rastrear ruta (Llama a fn_rastrear_ruta_operativa en el Backend)
-  const handleRastrear = async () => {
-    if (!idRutaBusqueda && !ciBusqueda) {
-      setMensajeError("Ingresa un ID de Ruta o un CI de Operario para buscar.");
+  const handleConsultar = async () => {
+    if (!idRutaBusqueda) {
+      setMensajeError("Ingresa un ID de Ruta válido para consultar.");
       return;
     }
 
-    setCargandoBusqueda(true);
+    setCargando(true);
     setMensajeError(null);
     setMensajeExito(null);
 
     const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
 
     try {
-      const res = await fetch("http://localhost:4000/api/rutas/rastrear", {
+      // 1. Procedimiento Coordinador: sp_consultar_trazabilidad_ruta
+      const resProc = await fetch("http://localhost:4000/api/rutas/trazabilidad", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -47,49 +61,20 @@ export default function RutasModule({ gestor }: Props) {
         body: JSON.stringify({
           gestor,
           entorno,
-          id_ruta: idRutaBusqueda ? Number(idRutaBusqueda) : null,
-          ci: ciBusqueda ? Number(ciBusqueda) : null,
+          id_ruta: Number(idRutaBusqueda),
+          fecha: fechaOperativa,
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.exito) {
-        throw new Error(data.error || "No se encontró la ruta en la base de datos.");
+      const dataProc = await resProc.json();
+      if (!resProc.ok || !dataProc.exito) {
+        throw new Error(dataProc.error || "No se encontró la ruta en la base de datos.");
       }
 
-      setRutaInfo(data.datos);
-      setMensajeExito("Ruta recuperada correctamente desde la Base de Datos.");
-    } catch (err: any) {
-      setRutaInfo(null);
-      setMensajeError(err.message || "Error al rastrear ruta.");
-    } finally {
-      setCargandoBusqueda(false);
-    }
-  };
+      setTrazabilidad(dataProc.datos);
 
-  // 2. Iniciar operativo (Llama a sp_iniciar_operativo_recoleccion)
-  const handleDespachar = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!idRutaDespacho || !idVehiculo || !ciConductor) {
-      setMensajeError("Completa los campos obligatorios: ID Ruta, ID Vehículo y CI Conductor.");
-      return;
-    }
-
-    setCargandoDespacho(true);
-    setMensajeError(null);
-    setMensajeExito(null);
-
-    const listaAyudantes = ayudantesTexto
-      ? ayudantesTexto
-          .split(",")
-          .map((c) => Number(c.trim()))
-          .filter((n) => !isNaN(n))
-      : [];
-
-    const entorno = localStorage.getItem("recoleccion_entorno") || "docker";
-
-    try {
-      const res = await fetch("http://localhost:4000/api/rutas/iniciar-operativo", {
+      // 2. Función con Cursor Explícito: cr_recorrer_contenedores_ruta
+      const resCursor = await fetch("http://localhost:4000/api/rutas/contenedores-tramo", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -99,34 +84,28 @@ export default function RutasModule({ gestor }: Props) {
         body: JSON.stringify({
           gestor,
           entorno,
-          id_ruta: Number(idRutaDespacho),
-          id_vehiculo: Number(idVehiculo),
-          ci_conductor: Number(ciConductor),
-          ayudantes: listaAyudantes,
-          turno,
+          id_ruta: Number(idRutaBusqueda),
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.exito) {
-        throw new Error(data.error || "Error al ejecutar el despacho.");
+      const dataCursor = await resCursor.json();
+      if (resCursor.ok && dataCursor.exito) {
+        setContenedores(dataCursor.datos || []);
       }
 
-      setMensajeExito(data.mensaje || "Operativo iniciado exitosamente.");
-      setIdRutaDespacho("");
-      setIdVehiculo("");
-      setCiConductor("");
-      setAyudantesTexto("");
+      setMensajeExito(`Diagnóstico de la Ruta #${idRutaBusqueda} recuperado exitosamente.`);
     } catch (err: any) {
-      setMensajeError(err.message || "Error al iniciar operativo.");
+      setTrazabilidad(null);
+      setContenedores([]);
+      setMensajeError(err.message || "Error al consultar trazabilidad de ruta.");
     } finally {
-      setCargandoDespacho(false);
+      setCargando(false);
     }
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-      {/* TARJETA SUPERIOR: BÚSQUEDA Y RASTREO */}
+      {/* TARJETA SUPERIOR: PANEL DE CONSULTA Y ESTADO */}
       <div
         style={{
           background: "var(--color-bg-secondary, #ffffff)",
@@ -148,14 +127,14 @@ export default function RutasModule({ gestor }: Props) {
         </h3>
         <p style={{ margin: 0, fontSize: "12px", color: "var(--color-texto-muted, #64748b)" }}>
           Motor activo: <strong style={{ textTransform: "uppercase", color: "#2563eb" }}>{gestor}</strong> |{" "}
-          Objetos conectados: <code>fn_rastrear_ruta_operativa</code>, <code>sp_iniciar_operativo_recoleccion</code>
+          Objetos conectados: <code>sp_consultar_trazabilidad_ruta</code>, <code>cr_recorrer_contenedores_ruta</code>
         </p>
 
-        {/* Buscador Dual */}
+        {/* Barra de Filtros */}
         <div style={{ display: "flex", gap: "12px", marginTop: "16px", flexWrap: "wrap", alignItems: "center" }}>
           <input
             type="number"
-            placeholder="Buscar por ID Ruta (ej. 101)..."
+            placeholder="ID Ruta (ej. 100)..."
             value={idRutaBusqueda}
             onChange={(e) => setIdRutaBusqueda(e.target.value)}
             style={{
@@ -163,32 +142,31 @@ export default function RutasModule({ gestor }: Props) {
               borderRadius: "8px",
               border: "1px solid var(--color-borde, #cbd5e1)",
               fontSize: "13px",
-              width: "210px",
+              width: "180px",
               background: "var(--color-bg-primary, #ffffff)",
               color: "var(--color-texto, #1e293b)",
             }}
           />
-          <span style={{ fontSize: "12px", color: "#94a3b8" }}>o</span>
+
           <input
-            type="number"
-            placeholder="Buscar por CI Chofer/Ayudante..."
-            value={ciBusqueda}
-            onChange={(e) => setCiBusqueda(e.target.value)}
+            type="date"
+            value={fechaOperativa}
+            onChange={(e) => setFechaOperativa(e.target.value)}
             style={{
               padding: "8px 14px",
               borderRadius: "8px",
               border: "1px solid var(--color-borde, #cbd5e1)",
               fontSize: "13px",
-              width: "230px",
               background: "var(--color-bg-primary, #ffffff)",
               color: "var(--color-texto, #1e293b)",
             }}
           />
+
           <button
-            onClick={handleRastrear}
-            disabled={cargandoBusqueda}
+            onClick={handleConsultar}
+            disabled={cargando}
             style={{
-              padding: "8px 18px",
+              padding: "8px 20px",
               borderRadius: "8px",
               background: "#2563eb",
               color: "#ffffff",
@@ -196,13 +174,14 @@ export default function RutasModule({ gestor }: Props) {
               fontSize: "13px",
               fontWeight: 600,
               cursor: "pointer",
+              boxShadow: "0 2px 4px rgba(37,99,235,0.2)",
             }}
           >
-            {cargandoBusqueda ? "Buscando..." : "🔍 Rastrear Ruta"}
+            {cargando ? "Consultando..." : "🔍 Consultar Trazabilidad"}
           </button>
         </div>
 
-        {/* Alertas */}
+        {/* Alertas de Notificación */}
         {mensajeError && (
           <div
             style={{
@@ -233,15 +212,17 @@ export default function RutasModule({ gestor }: Props) {
         )}
       </div>
 
-      {/* CUERPO: FICHA DE LA RUTA + FORMULARIO DE DESPACHO */}
+      {/* CUERPO: GRILLA DE DIAGNÓSTICO OPERATIVO */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-        {/* PANEL IZQUIERDO: DETALLE DE LA RUTA ENCONTRADA */}
+        {/* PANEL IZQUIERDO: RESUMEN DE TRAZABILIDAD (PROCEDIMIENTO + 3 FUNCIONES) */}
         <div
           style={{
             background: "var(--color-bg-secondary, #ffffff)",
             padding: "20px",
             borderRadius: "12px",
             border: "1px solid var(--color-borde, #e2e8f0)",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
           <h4
@@ -252,206 +233,175 @@ export default function RutasModule({ gestor }: Props) {
               color: "var(--color-texto, #0F2C59)",
             }}
           >
-            🗺️ Hoja de Ruta Operativa
+            🗺️ Hoja de Ruta y Diagnóstico Operativo
           </h4>
 
-          {rutaInfo ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px", fontSize: "13px" }}>
-              <div>
-                <strong>Ruta:</strong> #{rutaInfo.id_ruta} - {rutaInfo.nombre_ruta}
-              </div>
-              <div>
-                <strong>Distancia estimada:</strong> {rutaInfo.distancia_km} km
-              </div>
-              <div>
-                <strong>Vehículo:</strong>{" "}
-                <span style={{ color: "#2563eb", fontWeight: 600 }}>{rutaInfo.placa_vehiculo}</span>
-              </div>
-              <div>
-                <strong>Conductor asignado:</strong> {rutaInfo.conductor}
-              </div>
-              <div>
-                <strong>Contenedores en el tramo:</strong> {rutaInfo.total_contenedores} puntos
+          {trazabilidad ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px", fontSize: "13px" }}>
+              <div style={{ padding: "10px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                <strong>Ruta:</strong> #{trazabilidad.id_ruta} - {trazabilidad.nombre_ruta}
               </div>
 
-              <div style={{ marginTop: "10px" }}>
-                <strong>Contenedores vinculados:</strong>
-                <div
-                  style={{
-                    maxHeight: "160px",
-                    overflowY: "auto",
-                    marginTop: "6px",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                  }}
-                >
-                  {rutaInfo.geojson_contenedores && rutaInfo.geojson_contenedores.length > 0 ? (
-                    rutaInfo.geojson_contenedores.map((c: any, idx: number) => (
-                      <div
-                        key={idx}
-                        style={{ padding: "6px 10px", borderBottom: "1px solid #f1f5f9", fontSize: "12px" }}
-                      >
-                        #{c.id_contenedor} - {c.ubicacion} ({c.estado})
-                      </div>
-                    ))
-                  ) : (
-                    <div style={{ padding: "10px", color: "#94a3b8", fontSize: "12px" }}>
-                      Sin contenedores asignados en esta ruta.
-                    </div>
-                  )}
-                </div>
+              <div>
+                <strong>Vehículo de Turno:</strong>{" "}
+                <span style={{ color: "#2563eb", fontWeight: 700 }}>
+                  {trazabilidad.placa_vehiculo || "SIN ASIGNAR"}
+                </span>
+              </div>
+
+              <div>
+                <strong>Conductor Asignado:</strong>{" "}
+                <span>{trazabilidad.conductor || "Sin conductor"}</span>
+                <span style={{ marginLeft: "8px", fontSize: "11px", color: "#059669", fontFamily: "monospace" }}>
+                  (fn_obtener_conductor_ruta)
+                </span>
+              </div>
+
+              <div>
+                <strong>Puntos de Acopio:</strong>{" "}
+                <strong>{trazabilidad.total_contenedores} contenedores</strong>
+                <span style={{ marginLeft: "8px", fontSize: "11px", color: "#2563eb", fontFamily: "monospace" }}>
+                  (fn_contar_contenedores_ruta)
+                </span>
+              </div>
+
+              <div>
+                <strong>Carga Estimada de Basura:</strong>{" "}
+                <strong style={{ color: "#d97706" }}>
+                  {Number(trazabilidad.capacidad_total_litros || 0).toLocaleString()} Litros
+                </strong>
+                <span style={{ marginLeft: "8px", fontSize: "11px", color: "#d97706", fontFamily: "monospace" }}>
+                  (fn_calcular_capacidad_ruta)
+                </span>
+              </div>
+
+              <div style={{ marginTop: "8px", padding: "10px", background: "#eff6ff", borderRadius: "8px", fontSize: "12px", color: "#1e40af" }}>
+                ℹ️ <em>Datos orquestados mediante el procedimiento almacenado <code>sp_consultar_trazabilidad_ruta</code>.</em>
               </div>
             </div>
           ) : (
             <div
               style={{
-                padding: "50px 10px",
+                margin: "auto",
+                padding: "60px 10px",
                 textAlign: "center",
                 color: "var(--color-texto-muted, #94a3b8)",
                 fontSize: "13px",
               }}
             >
-              Ingresa un ID de ruta (ej. 101) o carnet de chofer arriba para consultar.
+              <div style={{ fontSize: "40px", marginBottom: "8px" }}>🗺️</div>
+              Ingresa un ID de ruta (ej. 100) y haz clic en <strong>"Consultar Trazabilidad"</strong>.
             </div>
           )}
         </div>
 
-        {/* PANEL DERECHO: FORMULARIO DE DESPACHO */}
+        {/* PANEL DERECHO: PUNTOS EN EL TRAMO (RECORRIDOS CON CURSOR EXPLÍCITO) */}
         <div
           style={{
             background: "var(--color-bg-secondary, #ffffff)",
             padding: "20px",
             borderRadius: "12px",
             border: "1px solid var(--color-borde, #e2e8f0)",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
-          <h4
-            style={{
-              margin: "0 0 14px 0",
-              fontSize: "14px",
-              fontWeight: 700,
-              color: "var(--color-texto, #0F2C59)",
-            }}
-          >
-            🚛 Despachar Operativo (Procedimiento Atómico)
-          </h4>
-
-          <form onSubmit={handleDespachar} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                ID Ruta *
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 101"
-                value={idRutaDespacho}
-                onChange={(e) => setIdRutaDespacho(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--color-borde, #cbd5e1)",
-                  fontSize: "12px",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                ID Vehículo *
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 1"
-                value={idVehiculo}
-                onChange={(e) => setIdVehiculo(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--color-borde, #cbd5e1)",
-                  fontSize: "12px",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                CI Conductor Principal *
-              </label>
-              <input
-                type="number"
-                placeholder="Ej. 7884210"
-                value={ciConductor}
-                onChange={(e) => setCiConductor(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--color-borde, #cbd5e1)",
-                  fontSize: "12px",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                CIs Ayudantes (separados por coma)
-              </label>
-              <input
-                type="text"
-                placeholder="Ej. 6543210, 9876540"
-                value={ayudantesTexto}
-                onChange={(e) => setAyudantesTexto(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--color-borde, #cbd5e1)",
-                  fontSize: "12px",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                Turno
-              </label>
-              <select
-                value={turno}
-                onChange={(e) => setTurno(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--color-borde, #cbd5e1)",
-                  fontSize: "12px",
-                }}
-              >
-                <option value="MAÑANA">Mañana</option>
-                <option value="TARDE">Tarde</option>
-                <option value="NOCHE">Noche</option>
-              </select>
-            </div>
-
-            <button
-              type="submit"
-              disabled={cargandoDespacho}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+            <h4
               style={{
-                marginTop: "10px",
-                padding: "9px",
-                borderRadius: "6px",
-                background: "#059669",
-                color: "#ffffff",
-                border: "none",
-                fontWeight: 600,
-                fontSize: "13px",
-                cursor: "pointer",
+                margin: 0,
+                fontSize: "14px",
+                fontWeight: 700,
+                color: "var(--color-texto, #0F2C59)",
               }}
             >
-              {cargandoDespacho ? "Despachando..." : "⚡ Iniciar Operativo de Recolección"}
-            </button>
-          </form>
+              📦 Contenedores en el Tramo (Cursor)
+            </h4>
+            {contenedores.length > 0 && (
+              <span
+                style={{
+                  fontSize: "11px",
+                  padding: "3px 8px",
+                  borderRadius: "6px",
+                  background: "#f1f5f9",
+                  color: "#475569",
+                  fontWeight: 600,
+                }}
+              >
+                {contenedores.length} Puntos
+              </span>
+            )}
+          </div>
+
+          {contenedores.length === 0 ? (
+            <div
+              style={{
+                margin: "auto",
+                padding: "60px 10px",
+                textAlign: "center",
+                color: "var(--color-texto-muted, #94a3b8)",
+                fontSize: "13px",
+              }}
+            >
+              <div style={{ fontSize: "40px", marginBottom: "8px" }}>📦</div>
+              Sin datos de tramo. Los puntos se leerán fila por fila con el cursor explícito <code>cr_recorrer_contenedores_ruta</code>.
+            </div>
+          ) : (
+            <div
+              style={{
+                maxHeight: "340px",
+                overflowY: "auto",
+                border: "1px solid #e2e8f0",
+                borderRadius: "8px",
+              }}
+            >
+              <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "12px" }}>
+                <thead>
+                  <tr style={{ borderBottom: "2px solid #e2e8f0", background: "#f8fafc", color: "#64748b" }}>
+                    <th style={{ padding: "8px 10px" }}>ID</th>
+                    <th style={{ padding: "8px 10px" }}>Ubicación</th>
+                    <th style={{ padding: "8px 10px" }}>Capacidad</th>
+                    <th style={{ padding: "8px 10px" }}>Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {contenedores.map((c) => (
+                    <tr key={c.id_contenedor} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                      <td style={{ padding: "8px 10px", fontWeight: 700, color: "#2563eb" }}>
+                        #{c.id_contenedor}
+                      </td>
+                      <td style={{ padding: "8px 10px" }}>{c.ubicacion}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: "monospace" }}>{c.capacidad} L</td>
+                      <td style={{ padding: "8px 10px" }}>
+                        <span
+                          style={{
+                            padding: "3px 8px",
+                            borderRadius: "4px",
+                            fontSize: "10px",
+                            fontWeight: 700,
+                            background:
+                              c.estado === "BUENO"
+                                ? "#dcfce7"
+                                : c.estado === "DANADO"
+                                ? "#fee2e2"
+                                : "#fef3c7",
+                            color:
+                              c.estado === "BUENO"
+                                ? "#166534"
+                                : c.estado === "DANADO"
+                                ? "#991b1b"
+                                : "#92400e",
+                          }}
+                        >
+                          {c.estado}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>

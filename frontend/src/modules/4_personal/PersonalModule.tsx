@@ -4,12 +4,10 @@ import "./PersonalModule.css";
 import { ejecutarSQL } from "./sql";
 
 import VistaEmpleados from "./VistaEmpleados";
-import VistaAsignaciones from "./VistaAsignaciones";
 import VistaAntiguedad from "./VistaAntiguedad";
 import VistaLicencias from "./VistaLicencias";
 import VistaHistorialSalarios from "./VistaHistorialSalarios";
-
-import FormularioAsignacion from "./FormularioAsignacion";
+import VistaEscalafon from "./VistaEscalafon";
 import FormularioSalario from "./FormularioSalario";
 
 interface Props {
@@ -17,167 +15,104 @@ interface Props {
 }
 
 export default function PersonalModule({ gestor }: Props) {
-  const obtenerFechaActual = () => {
-    const hoy = new Date();
-    const anio = hoy.getFullYear();
-    const mes = String(hoy.getMonth() + 1).padStart(2, "0");
-    const dia = String(hoy.getDate()).padStart(2, "0");
-
-    return `${anio}-${mes}-${dia}`;
-  };
-
-  const [vista, setVista] = useState("empleados");
+  // Vista activa por defecto: Planilla y Escalafón (Cursor)
+  const [vista, setVista] = useState("escalafon");
 
   const [empleados, setEmpleados] = useState<any[][]>([]);
   const [antiguedades, setAntiguedades] = useState<any[][]>([]);
   const [conductores, setConductores] = useState<any[][]>([]);
-  const [asignaciones, setAsignaciones] = useState<any[]>([]);
   const [historial, setHistorial] = useState<any[][]>([]);
+  const [escalafon, setEscalafon] = useState<any[]>([]);
 
-  const [tipoAsignacion, setTipoAsignacion] = useState("");
-  const [fecha, setFecha] = useState(obtenerFechaActual());
-  const [fechaBusqueda, setFechaBusqueda] = useState(obtenerFechaActual());
-  const [turno, setTurno] = useState("MANANA");
-
-  const [vehiculos, setVehiculos] = useState<any[]>([]);
-  const [empleadosDisponibles, setEmpleadosDisponibles] = useState<any[]>([]);
-
-  const [idVehiculo, setIdVehiculo] = useState("");
   const [ciEmpleado, setCiEmpleado] = useState("");
-  const [empleadosSeleccionados, setEmpleadosSeleccionados] = useState<string[]>([]);
-
   const [salario, setSalario] = useState("");
 
   const [mensaje, setMensaje] = useState("");
   const [cargando, setCargando] = useState(false);
 
+  // 1. Cursor Explícito de Escalafón y Planilla (Vista Principal)
+  const consultarEscalafonCursor = async () => {
+    try {
+      setCargando(true);
+      setMensaje("");
+      const entorno = localStorage.getItem("recoleccion_entorno") || "local";
+
+      const res = await fetch("http://localhost:4000/api/personal/escalafon", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
+        body: JSON.stringify({ gestor, tipo_filtro: "TODOS" }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.exito) {
+        throw new Error(data.error || "Error al ejecutar el cursor de escalafón.");
+      }
+
+      setEscalafon(data.datos || []);
+      setVista("escalafon");
+    } catch (error: any) {
+      console.error("Error en cursor escalafón:", error);
+      setMensaje(error.message || "Error al ejecutar cursor de escalafón.");
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  // Cargar escalafón al montar el componente
+  useEffect(() => {
+    consultarEscalafonCursor();
+  }, [gestor]);
+
+  // 2. Consulta estándar de empleados
   const consultarEmpleados = async () => {
     try {
+      setCargando(true);
       const datos = await ejecutarSQL(
         gestor,
         `
-        select
-        ci,concat(nombre, ' ', paterno, ' ', materno) as nombre,
-        to_char(fechanac, 'dd/mm/yyyy') as nacimiento,telefono,direccion,
-        to_char(fecha_ingreso, 'dd/mm/yyyy') as ingreso,salario,genero
-        from empleado
-        order by paterno, materno;
+        SELECT
+          ci,
+          CONCAT(nombre, ' ', paterno, ' ', materno) as nombre,
+          TO_CHAR(fechanac, 'dd/mm/yyyy') as nacimiento,
+          telefono,
+          direccion,
+          TO_CHAR(fecha_ingreso, 'dd/mm/yyyy') as ingreso,
+          salario,
+          genero
+        FROM EMPLEADO
+        ORDER BY paterno, materno;
         `
       );
 
       setEmpleados(datos.map((empleado: any) => Object.values(empleado)));
+      setVista("empleados");
+      setMensaje("");
     } catch (error) {
-      console.error("Error:", error);
-      setMensaje("Error");
+      console.error("Error al consultar empleados:", error);
+      setMensaje("Error al consultar empleados.");
+    } finally {
+      setCargando(false);
     }
   };
 
-  useEffect(() => {
-    consultarEmpleados();
-  }, [gestor]);
-
-
-
-  useEffect(() => {
-    if (vista !== "formulario") return;
-
-    const cargarDatos = async () => {
-      try {
-        setCargando(true);
-        setMensaje("");
-
-        const filtroVehiculo =
-          tipoAsignacion === "conductor"
-            ? "AND c.ci IS NULL"
-            : "AND c.ci IS NOT NULL";
-
-        const datosVehiculos = await ejecutarSQL(
-          gestor,
-          `
-          select v.id_vehiculo, v.placa,v.tipo,v.modelo,c.ci,
-          concat(e.nombre, ' ', e.paterno, ' ', e.materno) as conductor
-          from vehiculo v
-          left join conduce c on c.id_vehiculo = v.id_vehiculo
-          and c.fecha = '${fecha}'::date and c.turno = '${turno}'
-          left join empleado e on e.ci = c.ci
-          where 1 = 1
-          ${filtroVehiculo}
-          order by v.placa;
-          `
-        );
-
-        setVehiculos(datosVehiculos);
-
-        let datosEmpleados: any[] = [];
-
-        if (tipoAsignacion === "conductor") {
-          datosEmpleados = await ejecutarSQL(
-            gestor,
-            `
-            select e.ci,concat(e.nombre, ' ', e.paterno, ' ', e.materno) as nombre
-            from empleado e
-            inner join conductor c on c.ci = e.ci
-            where not exists (
-            select 1
-            from conduce co
-            where co.ci = e.ci
-            and co.fecha = '${fecha}'::date and co.turno = '${turno}'
-            )
-            and not exists (
-            select 1
-            from asigna_ayudante a
-            where a.ci = e.ci
-            and a.fecha = '${fecha}'::date
-            and a.turno = '${turno}'
-            )
-            order by e.paterno, e.materno;
-          
-          `);
-        } else {
-          datosEmpleados = await ejecutarSQL(
-            gestor,
-            `
-            select e.ci, concat(e.nombre, ' ', e.paterno, ' ', e.materno) as nombre
-            from empleado e
-            inner join ayudante a on a.ci = e.ci
-            where not exists (
-            select 1
-            from conduce c
-            where c.ci = e.ci and c.fecha = '${fecha}'::date and c.turno = '${turno}'
-            )
-            and not exists (
-            select 1
-            from asigna_ayudante aa
-            where aa.ci = e.ci and aa.fecha = '${fecha}'::date and aa.turno = '${turno}'
-            )
-            order by e.paterno, e.materno;
-          `);
-        }
-
-        setEmpleadosDisponibles(datosEmpleados);
-      } catch (error) {
-        console.error("Error:", error);
-        setMensaje("Error");
-      } finally {
-        setCargando(false);
-      }
-    };
-
-    cargarDatos();
-  }, [vista, tipoAsignacion, fecha, turno, gestor]);
-
+  // 3. Consulta de antigüedad analítica (fn_antiguedad_empleado)
   const consultarAntiguedad = async () => {
     try {
       setCargando(true);
-
       const datos = await ejecutarSQL(
         gestor,
         `
-        select ci, concat(nombre, ' ', paterno, ' ', materno) as empleado,
-        to_char(fecha_ingreso, 'dd/mm/yyyy') as fecha_ingreso,
-        antiguedad_empleado(ci) as antiguedad
-        from empleado
-        order by antiguedad_empleado(ci) desc;
+        SELECT 
+          ci, 
+          CONCAT(nombre, ' ', paterno, ' ', materno) as empleado,
+          TO_CHAR(fecha_ingreso, 'dd/mm/yyyy') as fecha_ingreso,
+          antiguedad_empleado(ci) as antiguedad
+        FROM EMPLEADO
+        ORDER BY antiguedad_empleado(ci) DESC;
         `
       );
 
@@ -185,30 +120,33 @@ export default function PersonalModule({ gestor }: Props) {
       setVista("antiguedad");
       setMensaje("");
     } catch (error) {
-      console.error("Error :", error);
-      setMensaje("Error");
+      console.error("Error al consultar antigüedad:", error);
+      setMensaje("Error al consultar antigüedad.");
     } finally {
       setCargando(false);
     }
   };
 
+  // 4. Control de licencias de choferes
   const consultarLicencias = async () => {
     try {
       setCargando(true);
-
       const datos = await ejecutarSQL(
         gestor,
         `
-        select e.ci,concat(e.nombre, ' ', e.paterno, ' ', e.materno) as conductor,c.categoria,
-        to_char(c.vencimiento_licencia, 'dd/mm/yyyy') as vencimiento,
-        case
-        when c.vencimiento_licencia < current_date then 'vencida'
-        when c.vencimiento_licencia <= current_date + 30 then 'proxima a vencer'
-        else 'vigente'
-        end as estado
-        from empleado e
-        inner join conductor c on c.ci = e.ci
-        order by c.vencimiento_licencia asc;
+        SELECT 
+          e.ci,
+          CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) as conductor,
+          c.categoria,
+          TO_CHAR(c.vencimiento_licencia, 'dd/mm/yyyy') as vencimiento,
+          CASE
+            WHEN c.vencimiento_licencia < CURRENT_DATE THEN 'VENCIDA'
+            WHEN c.vencimiento_licencia <= CURRENT_DATE + 30 THEN 'PROXIMA A VENCER'
+            ELSE 'VIGENTE'
+          END as estado
+        FROM EMPLEADO e
+        INNER JOIN CONDUCTOR c ON c.ci = e.ci
+        ORDER BY c.vencimiento_licencia ASC;
         `
       );
 
@@ -216,171 +154,57 @@ export default function PersonalModule({ gestor }: Props) {
       setVista("licencias");
       setMensaje("");
     } catch (error) {
-      console.error("Error:", error);
-      setMensaje("Error");
+      console.error("Error al consultar licencias:", error);
+      setMensaje("Error al consultar licencias.");
     } finally {
       setCargando(false);
     }
   };
 
-
-  const consultarAsignaciones = async (fechaConsulta: string) => {
-    if (!fechaConsulta) {
-      setMensaje("Selecciona una fecha.");
-      return;
-    }
-
-    try {
-      setCargando(true);
-      setMensaje("");
-
-      const datos = await ejecutarSQL(
-        gestor,
-        `
-        select
-        to_char(c.fecha, 'dd/mm/yyyy') as fecha,c.turno,v.placa,
-        concat(e.nombre, ' ', e.paterno, ' ', e.materno) as conductor,
-        string_agg(
-        distinct concat(ea.nombre, ' ', ea.paterno, ' ', ea.materno),
-        ', '
-        ) as ayudantes
-        from conduce c
-        inner join vehiculo v on v.id_vehiculo = c.id_vehiculo
-        inner join empleado e on e.ci = c.ci
-        left join asigna_ayudante a on a.id_vehiculo = c.id_vehiculo
-        and a.fecha = c.fecha and a.turno = c.turno
-        left join empleado ea on ea.ci = a.ci
-        where c.fecha = '${fechaConsulta}'::date
-        group byc.fecha,c.turno,v.placa,e.nombre,e.paterno,e.materno
-        order by c.turno, v.placa;
-        `
-      );
-
-      setAsignaciones(datos);
-      setFechaBusqueda(fechaConsulta);
-      setVista("asignaciones");
-    } catch (error) {
-      console.error("Error asignacion:", error);
-      setMensaje("Error");
-    } finally {
-      setCargando(false);
-    }
-  };
-
-  const abrirAsignacion = (tipo: string) => {
-    setTipoAsignacion(tipo);
-    setVista("formulario");
-    setIdVehiculo("");
-    setCiEmpleado("");
-    setEmpleadosSeleccionados([]);
-    setMensaje("");
-  };
-
-  const seleccionarEmpleado = (ci: string) => {
-    setEmpleadosSeleccionados((actuales) => {
-      if (actuales.includes(ci)) {
-        return actuales.filter((item) => item !== ci);
-      }
-
-      return [...actuales, ci];
-    });
-  };
-
-  const registrarConductor = async () => {
-    if (!ciEmpleado || !idVehiculo || !fecha) {
-      setMensaje("Completa");
-      return;
-    }
-
-    try {
-      setCargando(true);
-      setMensaje("");
-
-      await ejecutarSQL(
-        gestor,
-        `
-        select asigna_conductor(
-          ${Number(ciEmpleado)},
-          ${Number(idVehiculo)},
-          '${fecha}'::DATE,
-          '${turno}'
-        );
-        `
-      );
-
-      setMensaje("Conductor asignado");
-      setCiEmpleado("");
-    } catch (error: any) {
-      setMensaje(error.message || "Error");
-    } finally {
-      setCargando(false);
-    }
-  };
-
-  const registrarAyudantes = async () => {
-    if (!idVehiculo || empleadosSeleccionados.length === 0 || !fecha) {
-      setMensaje("Selecciona un vehículo y un ayudante");
-      return;
-    }
-
-    try {
-      setCargando(true);
-      setMensaje("");
-
-      for (const ci of empleadosSeleccionados) {
-        await ejecutarSQL(
-          gestor,
-          `
-          select asigna_ayudante(
-            ${Number(ci)},
-            ${Number(idVehiculo)},
-            '${fecha}'::DATE,
-            '${turno}'
-          );
-          `
-        );
-      }
-
-      setMensaje("Ayudantes asignados");
-      setEmpleadosSeleccionados([]);
-    } catch (error: any) {
-      setMensaje(error.message || "Error");
-    } finally {
-      setCargando(false);
-    }
-  };
-
+  // 5. Procedimiento Almacenado: Modificar Salario (UPDATE en EMPLEADO -> INSERT en HISTORIAL vía Trigger)
   const registrarSalario = async () => {
     if (!ciEmpleado || !salario) {
-      setMensaje("Completa todos los campos.");
+      setMensaje("Completa el CI y el nuevo salario.");
       return;
     }
 
     try {
       setCargando(true);
       setMensaje("");
+      const entorno = localStorage.getItem("recoleccion_entorno") || "local";
 
-      await ejecutarSQL(
-        gestor,
-        `
-        update empleado
-        set salario = ${Number(salario)}
-        where ci = ${Number(ciEmpleado)};
-        `
-      );
+      const res = await fetch("http://localhost:4000/api/personal/actualizar-salario", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-database-env": entorno,
+          "x-database-engine": gestor,
+        },
+        body: JSON.stringify({
+          gestor,
+          ci: Number(ciEmpleado),
+          salario: Number(salario),
+        }),
+      });
 
-      setMensaje("Salario actualizado");
+      const data = await res.json();
+      if (!res.ok || !data.exito) {
+        throw new Error(data.error || "Error al actualizar salario vía procedimiento.");
+      }
+
+      setMensaje(data.mensaje || "Salario actualizado correctamente.");
       setCiEmpleado("");
       setSalario("");
-
-      await consultarEmpleados();
+      // Refrescar escalafón para ver el nuevo salario reflejado
+      await consultarEscalafonCursor();
     } catch (error: any) {
-      setMensaje(error.message || "Error");
+      setMensaje(error.message || "Error al actualizar salario.");
     } finally {
       setCargando(false);
     }
   };
 
+  // 6. Consultar Historial Salarial (Auditado exclusivamente por el Trigger)
   const consultarHistorial = async () => {
     try {
       setCargando(true);
@@ -389,23 +213,24 @@ export default function PersonalModule({ gestor }: Props) {
       const datos = await ejecutarSQL(
         gestor,
         `
-        select h.id,h.ci,
-        concat(e.nombre, ' ', e.paterno, ' ', e.materno) as empleado,
-        h.salario_anterior,
-        h.salario_nuevo,
-        to_char(h.fecha_cambio, 'dd/mm/yyyy') as fecha_cambio
-        from historial_cambio_salario h
-        inner join empleado e on e.ci = h.ci
-        order by h.fecha_cambio desc, h.id desc;
-
+        SELECT 
+          h.id,
+          h.ci,
+          CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) as empleado,
+          h.salario_anterior,
+          h.salario_nuevo,
+          TO_CHAR(h.fecha_cambio, 'dd/mm/yyyy HH24:MI:SS') as fecha_cambio
+        FROM HISTORIAL_CAMBIO_SALARIO h
+        INNER JOIN EMPLEADO e ON e.ci = h.ci
+        ORDER BY h.fecha_cambio DESC, h.id DESC;
         `
       );
 
       setHistorial(datos.map((registro: any) => Object.values(registro)));
       setVista("historial");
     } catch (error) {
-      console.error("Error historial:", error);
-      setMensaje("Error");
+      console.error("Error al consultar historial:", error);
+      setMensaje("Error al consultar historial.");
     } finally {
       setCargando(false);
     }
@@ -414,46 +239,45 @@ export default function PersonalModule({ gestor }: Props) {
   return (
     <div className="contenedor">
       <div className="tarjeta">
-        <h3>
-          Módulo 4: Gestión de Cuadrillas, Choferes y Escalafón Salarial
-        </h3>
-
+        <h3>Módulo 4: Gestión de Cuadrillas, Choferes y Escalafón Salarial</h3>
         <p>
-          Motor activo: <strong className="motor">{gestor}</strong>
+          Motor activo: <strong className="motor">{gestor}</strong> | Objetos:{" "}
+          <code>sp_actualizar_salario_empleado</code> (UPDATE), <code>tg_historial_cambio_salario</code> (INSERT),{" "}
+          <code>cr_reporte_escalafon_personal</code>, <code>antiguedad_empleado</code>
         </p>
 
+        {/* Acciones principales limpias (Sin botones de inserción manual) */}
         <div className="acciones">
-          <button
-            className="boton1"
-            onClick={() => consultarAsignaciones(obtenerFechaActual())}
+          <button 
+            className={vista === "escalafon" ? "boton1" : "boton2"} 
+            onClick={consultarEscalafonCursor}
           >
-            Asignaciones de hoy
+            📈 Planilla y Escalafón (Cursor)
           </button>
 
-          <button
-            className="boton1"
-            onClick={() => abrirAsignacion("conductor")}
+          <button 
+            className={vista === "empleados" ? "boton1" : "boton2"} 
+            onClick={consultarEmpleados}
           >
-            Asignar conductor
+            Lista de empleados
           </button>
 
-          <button
-            className="boton1"
-            onClick={() => abrirAsignacion("ayudante")}
+          <button 
+            className={vista === "antiguedad" ? "boton1" : "boton2"} 
+            onClick={consultarAntiguedad}
           >
-            Asignar ayudantes
+            Antigüedad (Función)
           </button>
 
-          <button className="boton1" onClick={consultarAntiguedad}>
-            Antigüedad
-          </button>
-
-          <button className="boton1" onClick={consultarLicencias}>
+          <button 
+            className={vista === "licencias" ? "boton1" : "boton2"} 
+            onClick={consultarLicencias}
+          >
             Control de licencias
           </button>
 
           <button
-            className="boton1"
+            className={vista === "salario" ? "boton1" : "boton2"}
             onClick={() => {
               setMensaje("");
               setCiEmpleado("");
@@ -461,76 +285,32 @@ export default function PersonalModule({ gestor }: Props) {
               setVista("salario");
             }}
           >
-            Modificar salario
+            ⚙️ Modificar salario (SP)
           </button>
 
-          <button className="boton2" onClick={consultarHistorial}>
-            Historial salarial
+          <button 
+            className={vista === "historial" ? "boton1" : "boton2"} 
+            onClick={consultarHistorial}
+          >
+            🛡️ Historial Salarial (Trigger)
           </button>
         </div>
       </div>
 
       <div className="desarrollo">
-        {mensaje && vista !== "formulario" && vista !== "salario" && (
+        {mensaje && vista !== "salario" && (
           <p className="mensaje-asignacion">{mensaje}</p>
         )}
 
-        {vista === "empleados" && (
-          <VistaEmpleados empleados={empleados} />
-        )}
+        {cargando && <p style={{ color: "#93c5fd" }}>Cargando datos desde la base de datos...</p>}
 
-        {vista === "formulario" && (
-          <FormularioAsignacion
-            tipoAsignacion={tipoAsignacion}
-            fecha={fecha}
-            turno={turno}
-            idVehiculo={idVehiculo}
-            ciEmpleado={ciEmpleado}
-            vehiculos={vehiculos}
-            empleadosDisponibles={empleadosDisponibles}
-            empleadosSeleccionados={empleadosSeleccionados}
-            mensaje={mensaje}
-            cargando={cargando}
-            onFechaChange={(nuevaFecha) => {
-              setFecha(nuevaFecha);
-              setIdVehiculo("");
-              setCiEmpleado("");
-              setEmpleadosSeleccionados([]);
-            }}
-            onTurnoChange={(nuevoTurno) => {
-              setTurno(nuevoTurno);
-              setIdVehiculo("");
-              setCiEmpleado("");
-              setEmpleadosSeleccionados([]);
-            }}
-            onVehiculoChange={setIdVehiculo}
-            onEmpleadoChange={setCiEmpleado}
-            onSeleccionarAyudante={seleccionarEmpleado}
-            onRegistrar={
-              tipoAsignacion === "conductor"
-                ? registrarConductor
-                : registrarAyudantes
-            }
-          />
-        )}
+        {vista === "escalafon" && <VistaEscalafon filas={escalafon} />}
 
-        {vista === "asignaciones" && (
-          <VistaAsignaciones
-            asignaciones={asignaciones}
-            fechaBusqueda={fechaBusqueda}
-            cargando={cargando}
-            onFechaChange={setFechaBusqueda}
-            onBuscar={() => consultarAsignaciones(fechaBusqueda)}
-          />
-        )}
+        {vista === "empleados" && <VistaEmpleados empleados={empleados} />}
 
-        {vista === "antiguedad" && (
-          <VistaAntiguedad antiguedades={antiguedades} />
-        )}
+        {vista === "antiguedad" && <VistaAntiguedad antiguedades={antiguedades} />}
 
-        {vista === "licencias" && (
-          <VistaLicencias conductores={conductores} />
-        )}
+        {vista === "licencias" && <VistaLicencias conductores={conductores} />}
 
         {vista === "salario" && (
           <FormularioSalario
@@ -544,9 +324,7 @@ export default function PersonalModule({ gestor }: Props) {
           />
         )}
 
-        {vista === "historial" && (
-          <VistaHistorialSalarios historial={historial} />
-        )}
+        {vista === "historial" && <VistaHistorialSalarios historial={historial} />}
       </div>
     </div>
   );
